@@ -287,7 +287,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
       const state = await getStoredState();
-      let storeId: string | null =
+      const storeId: string | null =
         state.storeId ?? (await queryStoreIdFromTab());
       if (!storeId) {
         sendResponse({ stale: false, hasCache: true, uncertain: true });
@@ -325,12 +325,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === "GET_REBUILD_CART") {
-      const result = await new Promise<{ ica_rebuild_cart?: string }>((resolve) =>
-        chrome.storage.local.get("ica_rebuild_cart", resolve)
-      );
-      const data = result.ica_rebuild_cart
-        ? JSON.parse(result.ica_rebuild_cart)
-        : null;
+      const result = await chrome.storage.local.get(["ica_rebuild_cart"]);
+      const raw = result.ica_rebuild_cart;
+      const data =
+        typeof raw === "string" && raw.length > 0 ? JSON.parse(raw) : null;
       // Clear after reading so it's only used once
       chrome.storage.local.remove(["ica_rebuild_cart"]);
       sendResponse(data);
