@@ -19,13 +19,9 @@ export interface CartResponse {
 export interface CartItem {
   productId: string;
   quantity: number;
-  totalPrices?: {
-    finalUnitPrice?: {
-      amount: number;
-      currency: string;
-    };
-  };
   name?: string;
+  price?: { currency: string; amount: string };
+  finalPrice?: { currency: string; amount: string };
 }
 
 // Product pages API types
@@ -41,14 +37,19 @@ export interface ProductWrapper {
   product: Product;
 }
 
+export interface ProductPrice {
+  amount: string;
+  currency: string;
+}
+
 export interface Product {
   productId: string;
   retailerProductId?: string;
   name: string;
-  price?: {
-    amount: number;
-    currency: string;
-  };
+  /** Regular shelf price */
+  price?: ProductPrice;
+  /** Campaign/promo price — present when product is on sale */
+  promoPrice?: ProductPrice;
   imageUrl?: string;
 }
 
@@ -57,6 +58,7 @@ export interface ProductMatch {
   productId: string;
   name: string;
   quantity: number;
+  /** Effective unit price in current store (after discounts) */
   currentPrice: number | null;
   imageUrl?: string;
 }
@@ -68,6 +70,8 @@ export interface StorePrice {
   products: {
     productId: string;
     price: number | null;
+    /** Original price before discount, if any */
+    ordinaryPrice: number | null;
     available: boolean;
   }[];
   totalPrice: number;

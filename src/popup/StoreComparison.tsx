@@ -219,6 +219,7 @@ function ProductTable({
                     );
                     const price = p?.price ?? null;
                     const isCheapest = price !== null && price === minPrice;
+                    const onSale = p?.available && p.ordinaryPrice !== null;
                     return (
                       <td
                         key={s.storeId}
@@ -230,9 +231,16 @@ function ProductTable({
                             : "text-gray-700"
                         }`}
                       >
-                        {p?.available && price !== null
-                          ? formatPrice(price)
-                          : "–"}
+                        {p?.available && price !== null ? (
+                          <>
+                            {formatPrice(price)}
+                            {onSale && (
+                              <div className="text-[10px] text-gray-400 line-through font-normal">
+                                {formatPrice(p.ordinaryPrice!)}
+                              </div>
+                            )}
+                          </>
+                        ) : "–"}
                       </td>
                     );
                   })}

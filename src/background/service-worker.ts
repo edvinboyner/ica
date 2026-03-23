@@ -87,7 +87,7 @@ async function runComparison(
     throw new Error("NO_STORES");
   }
 
-  // Step 3: Fetch products for all stores in parallel
+  // Step 3: Fetch full product catalogue from each store in parallel
   const storeResults = await Promise.allSettled(
     stores.map(async (store) => {
       const products = await fetchAllProductsForStore(store.accountId);

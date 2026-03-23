@@ -43,15 +43,18 @@ export async function fetchActiveCart(storeId: string): Promise<CartItem[]> {
   return data.items ?? [];
 }
 
+/**
+ * Paginate through the full product catalogue for a store and return all products.
+ * Stops as soon as a page returns fewer items than the limit.
+ */
 export async function fetchAllProductsForStore(
   storeId: string
 ): Promise<Product[]> {
   const products: Product[] = [];
   const limit = 50;
   let offset = 0;
-  let hasMore = true;
 
-  while (hasMore) {
+  while (true) {
     const url =
       `${SHOP_API_BASE}/${storeId}/api/webproductpagews/v5/product-pages` +
       `?limit=${limit}&offset=${offset}&tag=web&tag=lihp`;
@@ -63,20 +66,15 @@ export async function fetchAllProductsForStore(
       break;
     }
 
-    const batch: Product[] = [];
+    let count = 0;
     for (const group of data.productGroups ?? []) {
       for (const pw of group.products ?? []) {
-        if (pw.product) batch.push(pw.product);
+        if (pw.product) { products.push(pw.product); count++; }
       }
     }
 
-    products.push(...batch);
-
-    if (batch.length < limit) {
-      hasMore = false;
-    } else {
-      offset += limit;
-    }
+    if (count < limit) break;
+    offset += limit;
   }
 
   return products;

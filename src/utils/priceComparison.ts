@@ -7,13 +7,40 @@ import type {
   ComparisonResult,
 } from "../api/types";
 
+/**
+ * Returns the effective unit price — promoPrice when on sale, otherwise price.
+ * ICA returns amounts as strings (e.g. "30.00"), so we parse them.
+ */
+export function effectivePrice(p: Product): number | null {
+  const raw = p.promoPrice?.amount ?? p.price?.amount;
+  return parseAmount(raw);
+}
+
+export function regularPrice(p: Product): number | null {
+  return parseAmount(p.price?.amount);
+}
+
+/** Parse a price string or number to float, returns null if not valid */
+function parseAmount(v: string | number | undefined | null): number | null {
+  if (v == null) return null;
+  const n = typeof v === "string" ? parseFloat(v) : v;
+  return isFinite(n) && n >= 0 ? n : null;
+}
+
 export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
-  return cartItems.map((item) => ({
-    productId: item.productId,
-    name: item.name ?? item.productId,
-    quantity: item.quantity,
-    currentPrice: item.totalPrices?.finalUnitPrice?.amount ?? null,
-  }));
+  return cartItems.map((item) => {
+    const currentPrice =
+      parseAmount(item.finalPrice?.amount) ??
+      parseAmount(item.price?.amount) ??
+      null;
+
+    return {
+      productId: item.productId,
+      name: item.name ?? item.productId,
+      quantity: item.quantity,
+      currentPrice,
+    };
+  });
 }
 
 export function buildStorePrice(
@@ -32,15 +59,19 @@ export function buildStorePrice(
 
   const products = cartItems.map((item) => {
     const found = productMap.get(item.productId);
-    if (!found || found.price == null) {
-      return { productId: item.productId, price: null, available: false };
+    const price = found ? effectivePrice(found) : null;
+    if (price === null) {
+      return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
     }
-    const lineTotal = found.price.amount * item.quantity;
+    const reg = regularPrice(found!);
+    const lineTotal = price * item.quantity;
     total += lineTotal;
     availableCount++;
     return {
       productId: item.productId,
-      price: found.price.amount,
+      price,
+      // Only set ordinaryPrice when there's an actual discount
+      ordinaryPrice: reg !== null && reg > price ? reg : null,
       available: true,
     };
   });
