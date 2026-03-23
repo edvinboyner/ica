@@ -12,11 +12,6 @@
     {
       "matches": ["https://handlaprivatkund.ica.se/*"],
       "js": ["content/content.js"]
-    },
-    {
-      "matches": ["https://handlaprivatkund.ica.se/*"],
-      "js": ["content/rebuildCart.js"],
-      "run_at": "document_idle"
     }
   ],
   "background": {

@@ -1,5 +1,62 @@
 import React from "react";
-import type { ComparisonResult, StorePrice, RebuildItem } from "../api/types";
+import type {
+  ComparisonResult,
+  StorePrice,
+  RebuildItem,
+  RebuildSessionState,
+} from "../api/types";
+
+function RebuildProgressPanel({ state }: { state: RebuildSessionState }) {
+  if (state.status === "running") {
+    const pct =
+      state.total > 0 ? Math.min(100, Math.round((state.current / state.total) * 100)) : 0;
+    return (
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+        <p className="text-xs text-gray-700">
+          Lägger till varor i{" "}
+          <span className="font-semibold text-gray-900">{state.storeName}</span>
+          …
+        </p>
+        <div className="h-2.5 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-[#1a5c2e] transition-[width] duration-300 ease-out"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <div className="flex justify-between text-[11px] text-gray-500 tabular-nums">
+          <span>
+            {state.current}/{state.total} varor
+          </span>
+          <span>{pct}%</span>
+        </div>
+        {state.itemName ? (
+          <p className="text-xs text-gray-800 truncate" title={state.itemName}>
+            {state.itemName}
+            {state.itemStatus === "not_found" && (
+              <span className="text-amber-700 ml-1">— hittades inte</span>
+            )}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-green-200 bg-green-50/80 p-3 text-xs text-green-950 space-y-1">
+      <p className="font-semibold">Återskapning klar</p>
+      <p>
+        {state.added} varor tillagda i {state.storeName}
+        {state.failed > 0 ? ` · ${state.failed} kunde inte läggas till` : ""}
+      </p>
+      {state.failedItems.length > 0 ? (
+        <p className="text-amber-900 leading-snug">
+          Saknas: {state.failedItems.slice(0, 6).join(", ")}
+          {state.failedItems.length > 6 ? " …" : ""}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 const FORMAT_LABEL: Record<string, string> = {
   kvantum: "Kvantum",
@@ -30,7 +87,19 @@ function StoreFormatBadge({ format }: { format: string }) {
   );
 }
 
-export default function StoreComparison({ result }: { result: ComparisonResult }) {
+export default function StoreComparison({
+  result,
+  rebuildState,
+  cartStale,
+  comparisonUpdatedAt,
+  onRefreshComparison,
+}: {
+  result: ComparisonResult;
+  rebuildState: RebuildSessionState | null;
+  cartStale: boolean;
+  comparisonUpdatedAt: number | null;
+  onRefreshComparison: () => void;
+}) {
   const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent } =
     result;
 
@@ -45,13 +114,56 @@ export default function StoreComparison({ result }: { result: ComparisonResult }
       name: i.name,
     }));
     chrome.runtime.sendMessage(
-      { type: "OPEN_CHEAPEST_CART", items, targetStoreId: cheapestStoreId },
-      () => { /* wait for ack before popup closes */ }
+      {
+        type: "OPEN_CHEAPEST_CART",
+        items,
+        targetStoreId: cheapestStoreId,
+        targetStoreName: cheapestStore?.storeName,
+      },
+      () => {
+        /* wait for ack before popup closes */
+      }
     );
   }
 
+  const updatedLabel =
+    comparisonUpdatedAt !== null
+      ? new Date(comparisonUpdatedAt).toLocaleTimeString("sv-SE", {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : null;
+
   return (
     <div className="space-y-4">
+      {cartStale && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-2">
+          <p className="text-xs text-amber-900">
+            Korgen har ändrats sedan senaste jämförelsen.
+          </p>
+          <button
+            type="button"
+            onClick={onRefreshComparison}
+            className="text-xs font-semibold text-amber-900 underline hover:text-amber-950"
+          >
+            Kör om jämförelse
+          </button>
+        </div>
+      )}
+
+      {updatedLabel && (
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>Uppdaterad {updatedLabel}</span>
+          <button
+            type="button"
+            onClick={onRefreshComparison}
+            className="font-medium text-[#e3000b] hover:underline"
+          >
+            Uppdatera
+          </button>
+        </div>
+      )}
+
       {/* Summary banner */}
       {savingVsCurrent > 0 && cheapestStore && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-2">
@@ -79,6 +191,8 @@ export default function StoreComparison({ result }: { result: ComparisonResult }
           </p>
         </div>
       )}
+
+      {rebuildState && <RebuildProgressPanel state={rebuildState} />}
 
       {/* Store list */}
       <div className="space-y-2">

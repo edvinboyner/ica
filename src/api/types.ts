@@ -107,7 +107,12 @@ export type MessageToBackground =
   | InitialStateMessage
   | { type: "GET_COMPARISON"; zipCode: string }
   | { type: "GET_STATE" }
-  | { type: "OPEN_CHEAPEST_CART"; items: RebuildItem[]; targetStoreId: string };
+  | {
+      type: "OPEN_CHEAPEST_CART";
+      items: RebuildItem[];
+      targetStoreId: string;
+      targetStoreName?: string;
+    };
 
 export type MessageFromBackground =
   | { type: "COMPARISON_RESULT"; data: ComparisonResult }
@@ -118,4 +123,40 @@ export interface StoredState {
   storeId: string | null;
   regionId: string | null;
   zipCode: string | null;
+}
+
+/** Persisted in chrome.storage.session while rebuild runs or after completion */
+export type RebuildSessionState =
+  | {
+      status: "running";
+      total: number;
+      storeName: string;
+      current: number;
+      itemName: string;
+      itemStatus?: "added" | "not_found";
+    }
+  | {
+      status: "complete";
+      total: number;
+      storeName: string;
+      added: number;
+      failed: number;
+      failedItems: string[];
+    };
+
+export interface ComparisonSessionCache {
+  timestamp: number;
+  sourceStoreId: string;
+  cartFingerprint: string;
+  results: ComparisonResult;
+}
+
+/** Shown in popup while GET_COMPARISON runs */
+export interface ComparisonProgressState {
+  status: "running";
+  /** cart | stores_list | store_catalogues */
+  step: "cart" | "stores_list" | "store_catalogues";
+  current: number;
+  total: number;
+  detail?: string;
 }
