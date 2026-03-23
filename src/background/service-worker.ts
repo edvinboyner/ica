@@ -10,13 +10,6 @@ import {
 } from "../utils/priceComparison";
 import type { StoredState, ComparisonResult } from "../api/types";
 
-// Clear any corrupted storeId that was saved as non-string
-chrome.storage.local.get(["storeId"], (result) => {
-  if (result.storeId !== undefined && typeof result.storeId !== "string") {
-    chrome.storage.local.remove("storeId");
-  }
-});
-
 // ─── State management ────────────────────────────────────────────────────────
 
 /** Ask the active ICA tab's content script for its current storeId */
@@ -147,19 +140,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
-    if (message.type === "GET_REBUILD_CART") {
-      const result = await new Promise<{ ica_rebuild_cart?: string }>((resolve) =>
-        chrome.storage.local.get("ica_rebuild_cart", resolve)
-      );
-      const data = result.ica_rebuild_cart
-        ? JSON.parse(result.ica_rebuild_cart)
-        : null;
-      // Clear after reading so it's only used once
-      chrome.storage.local.remove(["ica_rebuild_cart"]);
-      sendResponse(data);
-      return;
-    }
-
     if (message.type === "SAVE_ZIP") {
       await saveState({ zipCode: message.zipCode });
       sendResponse({ ok: true });
@@ -168,25 +148,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === "OPEN_CHEAPEST_CART") {
       const { items, targetStoreId } = message;
-      await new Promise<void>((resolve) =>
-        chrome.storage.local.set(
-          { ica_rebuild_cart: JSON.stringify({ items, targetStoreId }) },
-          resolve
-        )
-      );
       const tab = await chrome.tabs.create({
         url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
       });
 
-      const rebuildItems = items;
-      const rebuildStoreId = targetStoreId;
-
       const listener = (changedTabId: number, info: { status?: string }) => {
         if (changedTabId !== tab.id || info.status !== "complete") return;
         chrome.tabs.onUpdated.removeListener(listener);
-        chrome.storage.local.remove(["ica_rebuild_cart"]);
-
-        // First inject the rebuildCart module, then call rebuildCart()
         chrome.scripting.executeScript({
           target: { tabId: tab.id! },
           world: "MAIN",
@@ -198,7 +166,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             func: (items: unknown, storeId: string) => {
               (window as any).__icaRebuildCart(items, storeId);
             },
-            args: [rebuildItems, rebuildStoreId],
+            args: [items, targetStoreId],
           })
         ).catch((e) => console.error("inject failed", e));
       };
