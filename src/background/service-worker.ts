@@ -8,7 +8,17 @@ import {
   buildStorePrice,
   buildComparisonResult,
 } from "../utils/priceComparison";
-import type { StoredState, ComparisonResult } from "../api/types";
+import type {
+  StoredState,
+  ComparisonResult,
+  RebuildSessionState,
+  ComparisonSessionCache,
+  ComparisonProgressState,
+} from "../api/types";
+import {
+  fingerprintFromProductMatches,
+  fingerprintFromCartItems,
+} from "../utils/cartFingerprint";
 
 // Clear any corrupted storeId that was saved as non-string
 chrome.storage.local.get(["storeId"], (result) => {
@@ -86,25 +96,73 @@ async function runComparison(
   storeId: string,
   zipCode: string
 ): Promise<ComparisonResult> {
-  // Step 1: Fetch cart from current store
+  await persistComparisonProgress({
+    status: "running",
+    step: "cart",
+    current: 0,
+    total: 1,
+    detail: "Hämtar varukorg…",
+  });
+
   const cartItems = await fetchActiveCart(storeId);
   if (!cartItems.length) {
     throw new Error("EMPTY_CART");
   }
 
+  await persistComparisonProgress({
+    status: "running",
+    step: "cart",
+    current: 1,
+    total: 1,
+    detail: `${cartItems.length} varor i korgen`,
+  });
+
   const productMatches = buildProductMatches(cartItems);
 
-  // Step 2: Fetch all stores with home delivery for zip
+  await persistComparisonProgress({
+    status: "running",
+    step: "stores_list",
+    current: 0,
+    total: 1,
+    detail: "Hämtar butiker för ditt postnummer…",
+  });
+
   const stores = await fetchStoresForZip(zipCode);
   if (!stores.length) {
     throw new Error("NO_STORES");
   }
 
-  // Step 3: Fetch full product catalogue from each store in parallel
+  await persistComparisonProgress({
+    status: "running",
+    step: "stores_list",
+    current: 1,
+    total: 1,
+    detail: `${stores.length} butiker med hemleverans`,
+  });
+
+  const n = stores.length;
+  await persistComparisonProgress({
+    status: "running",
+    step: "store_catalogues",
+    current: 0,
+    total: n,
+    detail: "Hämtar sortiment från varje butik…",
+  });
+
+  let completed = 0;
   const storeResults = await Promise.allSettled(
     stores.map(async (store) => {
       const products = await fetchAllProductsForStore(store.accountId);
-      return buildStorePrice(store, productMatches, products);
+      const row = buildStorePrice(store, productMatches, products);
+      completed += 1;
+      await persistComparisonProgress({
+        status: "running",
+        step: "store_catalogues",
+        current: completed,
+        total: n,
+        detail: store.name,
+      });
+      return row;
     })
   );
 
@@ -122,10 +180,129 @@ async function runComparison(
   return buildComparisonResult(productMatches, storePrices, storeId);
 }
 
+async function persistRebuildState(state: RebuildSessionState | null) {
+  if (state === null) {
+    await chrome.storage.session.remove("rebuildState");
+    return;
+  }
+  await chrome.storage.session.set({ rebuildState: state });
+}
+
+async function saveComparisonCache(data: ComparisonSessionCache) {
+  await chrome.storage.session.set({ comparisonCache: data });
+}
+
+async function persistComparisonProgress(state: ComparisonProgressState | null) {
+  if (state === null) {
+    await chrome.storage.session.remove("comparisonProgress");
+    return;
+  }
+  await chrome.storage.session.set({ comparisonProgress: state });
+}
+
 // ─── Message handler ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
+    if (message.type === "REBUILD_STARTED") {
+      const { total, storeName } = message as {
+        total: number;
+        storeName: string;
+      };
+      await persistRebuildState({
+        status: "running",
+        total,
+        storeName,
+        current: 0,
+        itemName: "",
+      });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "REBUILD_PROGRESS") {
+      const { current, total, itemName, status } = message as {
+        current: number;
+        total: number;
+        itemName: string;
+        status: "added" | "not_found";
+      };
+      const raw = await chrome.storage.session.get("rebuildState");
+      const prev = raw.rebuildState as RebuildSessionState | undefined;
+      const storeName =
+        prev?.status === "running"
+          ? prev.storeName
+          : prev?.status === "complete"
+          ? prev.storeName
+          : "Butik";
+      await persistRebuildState({
+        status: "running",
+        total,
+        storeName,
+        current,
+        itemName,
+        itemStatus: status,
+      });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "REBUILD_COMPLETE") {
+      const { added, failed, failedItems } = message as {
+        added: number;
+        failed: number;
+        failedItems: string[];
+      };
+      const prev = (await chrome.storage.session.get("rebuildState"))
+        .rebuildState as RebuildSessionState | undefined;
+      const total =
+        prev?.status === "running"
+          ? prev.total
+          : prev?.status === "complete"
+          ? prev.total
+          : added + failed;
+      const storeName =
+        prev?.status === "running"
+          ? prev.storeName
+          : prev?.status === "complete"
+          ? prev.storeName
+          : "Butik";
+      await persistRebuildState({
+        status: "complete",
+        total,
+        storeName,
+        added,
+        failed,
+        failedItems,
+      });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "CHECK_CART_FINGERPRINT") {
+      const raw = await chrome.storage.session.get("comparisonCache");
+      const cache = raw.comparisonCache as ComparisonSessionCache | undefined;
+      if (!cache) {
+        sendResponse({ stale: false, hasCache: false });
+        return;
+      }
+      const state = await getStoredState();
+      let storeId: string | null =
+        state.storeId ?? (await queryStoreIdFromTab());
+      if (!storeId) {
+        sendResponse({ stale: false, hasCache: true, uncertain: true });
+        return;
+      }
+      const cartItems = await fetchActiveCart(storeId);
+      const fp = fingerprintFromCartItems(cartItems);
+      sendResponse({
+        stale: fp !== cache.cartFingerprint,
+        hasCache: true,
+        uncertain: false,
+      });
+      return;
+    }
+
     if (message.type === "ICA_INITIAL_STATE") {
       await saveState({
         storeId: message.storeId,
@@ -167,7 +344,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === "OPEN_CHEAPEST_CART") {
-      const { items, targetStoreId } = message;
+      const { items, targetStoreId, targetStoreName } = message as {
+        items: unknown;
+        targetStoreId: string;
+        targetStoreName?: string;
+      };
       await new Promise<void>((resolve) =>
         chrome.storage.local.set(
           { ica_rebuild_cart: JSON.stringify({ items, targetStoreId }) },
@@ -187,6 +368,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         chrome.storage.local.remove(["ica_rebuild_cart"]);
 
         // First inject the rebuildCart module, then call rebuildCart()
+        const storeLabel =
+          typeof targetStoreName === "string" && targetStoreName.length > 0
+            ? targetStoreName
+            : "Butik";
         chrome.scripting.executeScript({
           target: { tabId: tab.id! },
           world: "MAIN",
@@ -195,10 +380,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           chrome.scripting.executeScript({
             target: { tabId: tab.id! },
             world: "MAIN",
-            func: (items: unknown, storeId: string) => {
-              (window as any).__icaRebuildCart(items, storeId);
+            func: (items: unknown, storeId: string, name: string) => {
+              (window as any).__icaRebuildCart(items, storeId, name);
             },
-            args: [rebuildItems, rebuildStoreId],
+            args: [rebuildItems, rebuildStoreId, storeLabel],
           })
         ).catch((e) => console.error("inject failed", e));
       };
@@ -232,10 +417,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       try {
         const result = await runComparison(storeId, zipCode);
+        await saveComparisonCache({
+          timestamp: Date.now(),
+          sourceStoreId: storeId,
+          cartFingerprint: fingerprintFromProductMatches(result.cartItems),
+          results: result,
+        });
         sendResponse({ type: "COMPARISON_RESULT", data: result });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "UNKNOWN_ERROR";
         sendResponse({ type: "COMPARISON_ERROR", error: msg });
+      } finally {
+        await persistComparisonProgress(null);
       }
       return;
     }

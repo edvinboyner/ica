@@ -1,5 +1,6 @@
 // Rebuild cart via DOM clicks — runs in MAIN world via scripting.executeScript
 // This bypasses WAF which blocks programmatic API calls.
+// Progress → window.postMessage → isolated content script → chrome.runtime.sendMessage
 
 interface RebuildItem {
   productId: string;
@@ -31,6 +32,26 @@ function removeOverlay() {
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+function postRebuild(
+  msg:
+    | { type: "REBUILD_STARTED"; total: number; storeName: string }
+    | {
+        type: "REBUILD_PROGRESS";
+        current: number;
+        total: number;
+        itemName: string;
+        status: "added" | "not_found";
+      }
+    | {
+        type: "REBUILD_COMPLETE";
+        added: number;
+        failed: number;
+        failedItems: string[];
+      }
+) {
+  window.postMessage({ __icaExt: true, ...msg }, "*");
 }
 
 /** Navigate SPA to search and wait for product buttons to appear */
@@ -92,9 +113,15 @@ function findAddButton(retailerProductId?: string, name?: string): HTMLElement |
   return allBtns[0];
 }
 
-async function rebuildCart(items: RebuildItem[], storeId: string) {
+async function rebuildCart(
+  items: RebuildItem[],
+  storeId: string,
+  storeName: string = "Butik"
+) {
   const failed: string[] = [];
   let added = 0;
+
+  postRebuild({ type: "REBUILD_STARTED", total: items.length, storeName });
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -115,6 +142,13 @@ async function rebuildCart(items: RebuildItem[], storeId: string) {
     }
     if (!btn) {
       failed.push(displayName);
+      postRebuild({
+        type: "REBUILD_PROGRESS",
+        current: i + 1,
+        total: items.length,
+        itemName: displayName,
+        status: "not_found",
+      });
       continue;
     }
 
@@ -137,8 +171,22 @@ async function rebuildCart(items: RebuildItem[], storeId: string) {
       }
     }
     added++;
+    postRebuild({
+      type: "REBUILD_PROGRESS",
+      current: i + 1,
+      total: items.length,
+      itemName: displayName,
+      status: "added",
+    });
     await sleep(300);
   }
+
+  postRebuild({
+    type: "REBUILD_COMPLETE",
+    added,
+    failed: failed.length,
+    failedItems: failed,
+  });
 
   if (failed.length === 0) {
     showOverlay(`✓ Alla ${added} varor tillagda!`);

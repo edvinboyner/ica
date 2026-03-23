@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from "react";
 import StoreComparison from "./StoreComparison";
-import type { ComparisonResult } from "../api/types";
+import type {
+  ComparisonResult,
+  RebuildSessionState,
+  ComparisonProgressState,
+} from "../api/types";
 
 type View = "idle" | "loading" | "result" | "error";
 
@@ -12,6 +16,15 @@ export default function Popup() {
   const [result, setResult] = useState<ComparisonResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editingZip, setEditingZip] = useState(false);
+  const [rebuildState, setRebuildState] = useState<RebuildSessionState | null>(
+    null
+  );
+  const [cartStale, setCartStale] = useState(false);
+  const [comparisonUpdatedAt, setComparisonUpdatedAt] = useState<number | null>(
+    null
+  );
+  const [comparisonProgress, setComparisonProgress] =
+    useState<ComparisonProgressState | null>(null);
 
   // Load persisted state on mount
   useEffect(() => {
@@ -22,7 +35,97 @@ export default function Popup() {
         if (resp.zipCode) setZipCode(resp.zipCode);
       }
     });
+
+    chrome.storage.session.get(
+      ["rebuildState", "comparisonCache"],
+      (session) => {
+        if (session.rebuildState) {
+          setRebuildState(session.rebuildState as RebuildSessionState);
+        }
+        const cache = session.comparisonCache as
+          | { timestamp: number; results: ComparisonResult }
+          | undefined;
+        if (cache?.results) {
+          setResult(cache.results);
+          setComparisonUpdatedAt(cache.timestamp);
+          setView("result");
+        }
+      }
+    );
   }, []);
+
+  useEffect(() => {
+    const onMsg = (msg: { type?: string }) => {
+      if (
+        typeof msg?.type === "string" &&
+        (msg.type === "REBUILD_STARTED" ||
+          msg.type === "REBUILD_PROGRESS" ||
+          msg.type === "REBUILD_COMPLETE")
+      ) {
+        chrome.storage.session.get("rebuildState", (r) => {
+          setRebuildState((r.rebuildState as RebuildSessionState) ?? null);
+        });
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+    return () => chrome.runtime.onMessage.removeListener(onMsg);
+  }, []);
+
+  useEffect(() => {
+    // chrome.storage.session.onChanged skickar bara (changes), inte areaName —
+    // ett felaktigt area-check gjorde att inga uppdateringar nådde UI.
+    const onChange = (changes: Record<string, chrome.storage.StorageChange>) => {
+      if (changes.rebuildState) {
+        setRebuildState(
+          (changes.rebuildState.newValue as RebuildSessionState) ?? null
+        );
+      }
+      if (changes.comparisonCache?.newValue) {
+        const nv = changes.comparisonCache.newValue as {
+          timestamp: number;
+          results: ComparisonResult;
+        };
+        if (nv?.results) {
+          setResult(nv.results);
+          setComparisonUpdatedAt(nv.timestamp);
+          setView("result");
+          setCartStale(false);
+        }
+      }
+      if (changes.comparisonProgress) {
+        setComparisonProgress(
+          (changes.comparisonProgress.newValue as ComparisonProgressState) ??
+            null
+        );
+      }
+    };
+    chrome.storage.session.onChanged.addListener(onChange);
+    return () => chrome.storage.session.onChanged.removeListener(onChange);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "result" || !result) return;
+    chrome.runtime.sendMessage(
+      { type: "CHECK_CART_FINGERPRINT" },
+      (resp: { stale?: boolean; uncertain?: boolean }) => {
+        if (chrome.runtime.lastError) return;
+        if (resp?.uncertain) {
+          setCartStale(false);
+          return;
+        }
+        setCartStale(resp?.stale === true);
+      }
+    );
+  }, [view, result]);
+
+  useEffect(() => {
+    if (view !== "loading") return;
+    chrome.storage.session.get("comparisonProgress", (r) => {
+      if (r.comparisonProgress) {
+        setComparisonProgress(r.comparisonProgress as ComparisonProgressState);
+      }
+    });
+  }, [view]);
 
   async function saveZip(zip: string) {
     await new Promise<void>((resolve) =>
@@ -44,6 +147,12 @@ export default function Popup() {
 
     setView("loading");
     setError(null);
+    setComparisonProgress(null);
+    chrome.storage.session.get("comparisonProgress", (r) => {
+      if (r.comparisonProgress) {
+        setComparisonProgress(r.comparisonProgress as ComparisonProgressState);
+      }
+    });
 
     chrome.runtime.sendMessage(
       { type: "GET_COMPARISON", zipCode: zip },
@@ -55,6 +164,8 @@ export default function Popup() {
         }
         if (resp.type === "COMPARISON_RESULT") {
           setResult(resp.data);
+          setComparisonUpdatedAt(Date.now());
+          setCartStale(false);
           setView("result");
         } else {
           setError(humanizeError(resp.error));
@@ -96,10 +207,7 @@ export default function Popup() {
         )}
 
         {view === "loading" && (
-          <div className="text-center py-8 space-y-3">
-            <div className="inline-block w-8 h-8 border-4 border-[#e3000b] border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm text-gray-500">Hämtar priser från alla butiker…</p>
-          </div>
+          <ComparisonLoadingPanel progress={comparisonProgress} />
         )}
 
         {view === "error" && (
@@ -117,15 +225,13 @@ export default function Popup() {
         )}
 
         {view === "result" && result && (
-          <div className="space-y-3">
-            <StoreComparison result={result} />
-            <button
-              onClick={() => { setView("idle"); setResult(null); }}
-              className="w-full border border-gray-300 text-gray-600 text-sm py-2 rounded-lg hover:bg-gray-50"
-            >
-              Jämför igen
-            </button>
-          </div>
+          <StoreComparison
+            result={result}
+            rebuildState={rebuildState}
+            cartStale={cartStale}
+            comparisonUpdatedAt={comparisonUpdatedAt}
+            onRefreshComparison={runComparison}
+          />
         )}
 
         {!storeId && view === "idle" && (
@@ -148,6 +254,65 @@ export default function Popup() {
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+/** True % while fetching product catalogues (parallel per store); otherwise unknown duration */
+function comparisonProgressDeterminate(p: ComparisonProgressState): number {
+  if (p.step !== "store_catalogues" || p.total <= 0) return 0;
+  return Math.min(100, Math.round((p.current / p.total) * 100));
+}
+
+function isComparisonProgressIndeterminate(
+  progress: ComparisonProgressState | null
+): boolean {
+  if (!progress) return true;
+  // Varukorg + butikslista: ingen riktig del-progress från API → glidande stapel
+  if (progress.step === "cart" || progress.step === "stores_list") return true;
+  if (progress.step === "store_catalogues" && progress.total > 0 && progress.current === 0) {
+    return true;
+  }
+  return false;
+}
+
+function ComparisonLoadingPanel({
+  progress,
+}: {
+  progress: ComparisonProgressState | null;
+}) {
+  const indeterminate = isComparisonProgressIndeterminate(progress);
+  const pct = progress ? comparisonProgressDeterminate(progress) : 0;
+  const label = progress?.detail ?? "Startar jämförelse…";
+
+  return (
+    <div className="py-6 space-y-4">
+      <div className="relative h-3 bg-gray-200 rounded-full overflow-hidden">
+        {indeterminate ? (
+          <div className="ica-progress-indeterminate" aria-hidden />
+        ) : (
+          <div
+            className="h-full bg-[#e3000b] transition-[width] duration-300 ease-out rounded-full"
+            style={{ width: `${pct}%` }}
+          />
+        )}
+      </div>
+      <div className="flex justify-between text-[11px] text-gray-500 tabular-nums">
+        <span>
+          {!indeterminate && progress?.step === "store_catalogues"
+            ? `${pct}%`
+            : "…"}
+        </span>
+        {progress?.step === "store_catalogues" && progress.total > 0 ? (
+          <span>
+            {progress.current}/{progress.total} butiker
+          </span>
+        ) : null}
+      </div>
+      <p className="text-sm text-gray-700 leading-snug min-h-[2.5rem]">{label}</p>
+      <div className="flex justify-center pt-1">
+        <div className="w-7 h-7 border-[3px] border-[#e3000b] border-t-transparent rounded-full animate-spin" />
+      </div>
+    </div>
+  );
+}
 
 function ZipSection({
   savedZip,
