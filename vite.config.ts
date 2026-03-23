@@ -54,6 +54,7 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, "src/popup/index.html"),
         "content/content": resolve(__dirname, "src/content/content.ts"),
+        "content/rebuildCart": resolve(__dirname, "src/content/rebuildCart.ts"),
         "background/service-worker": resolve(
           __dirname,
           "src/background/service-worker.ts"

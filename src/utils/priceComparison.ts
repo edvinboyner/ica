@@ -36,6 +36,7 @@ export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
 
     return {
       productId: item.productId,
+      retailerProductId: item.retailerProductId,
       name: item.name ?? item.productId,
       quantity: item.quantity,
       currentPrice,
