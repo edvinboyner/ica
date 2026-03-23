@@ -18,6 +18,7 @@ export interface CartResponse {
 
 export interface CartItem {
   productId: string;
+  retailerProductId?: string;
   quantity: number;
   name?: string;
   price?: { currency: string; amount: string };
@@ -56,6 +57,7 @@ export interface Product {
 // Internal comparison types
 export interface ProductMatch {
   productId: string;
+  retailerProductId?: string;
   name: string;
   quantity: number;
   /** Effective unit price in current store (after discounts) */
@@ -94,10 +96,18 @@ export interface InitialStateMessage {
   zipCode?: string;
 }
 
+export interface RebuildItem {
+  productId: string;
+  retailerProductId?: string;
+  quantity: number;
+  name: string;
+}
+
 export type MessageToBackground =
   | InitialStateMessage
   | { type: "GET_COMPARISON"; zipCode: string }
-  | { type: "GET_STATE" };
+  | { type: "GET_STATE" }
+  | { type: "OPEN_CHEAPEST_CART"; items: RebuildItem[]; targetStoreId: string };
 
 export type MessageFromBackground =
   | { type: "COMPARISON_RESULT"; data: ComparisonResult }

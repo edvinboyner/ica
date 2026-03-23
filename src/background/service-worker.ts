@@ -10,6 +10,13 @@ import {
 } from "../utils/priceComparison";
 import type { StoredState, ComparisonResult } from "../api/types";
 
+// Clear any corrupted storeId that was saved as non-string
+chrome.storage.local.get(["storeId"], (result) => {
+  if (result.storeId !== undefined && typeof result.storeId !== "string") {
+    chrome.storage.local.remove("storeId");
+  }
+});
+
 // ─── State management ────────────────────────────────────────────────────────
 
 /** Ask the active ICA tab's content script for its current storeId */
@@ -51,10 +58,12 @@ async function getStoredState(): Promise<StoredState> {
     chrome.storage.local.get(
       ["storeId", "regionId", "zipCode"],
       (result) => {
+        const toStr = (v: unknown) =>
+          typeof v === "string" && v.length > 0 ? v : null;
         resolve({
-          storeId: (result.storeId as string) ?? null,
-          regionId: (result.regionId as string) ?? null,
-          zipCode: (result.zipCode as string) ?? null,
+          storeId: toStr(result.storeId),
+          regionId: toStr(result.regionId),
+          zipCode: toStr(result.zipCode),
         });
       }
     );
@@ -62,8 +71,12 @@ async function getStoredState(): Promise<StoredState> {
 }
 
 async function saveState(patch: Partial<StoredState>) {
+  // Guard: only save string values to prevent [object Object] bugs
+  const safe = Object.fromEntries(
+    Object.entries(patch).filter(([, v]) => v === null || typeof v === "string")
+  );
   return new Promise<void>((resolve) => {
-    chrome.storage.local.set(patch, resolve);
+    chrome.storage.local.set(safe, resolve);
   });
 }
 
@@ -134,8 +147,63 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
+    if (message.type === "GET_REBUILD_CART") {
+      const result = await new Promise<{ ica_rebuild_cart?: string }>((resolve) =>
+        chrome.storage.local.get("ica_rebuild_cart", resolve)
+      );
+      const data = result.ica_rebuild_cart
+        ? JSON.parse(result.ica_rebuild_cart)
+        : null;
+      // Clear after reading so it's only used once
+      chrome.storage.local.remove(["ica_rebuild_cart"]);
+      sendResponse(data);
+      return;
+    }
+
     if (message.type === "SAVE_ZIP") {
       await saveState({ zipCode: message.zipCode });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "OPEN_CHEAPEST_CART") {
+      const { items, targetStoreId } = message;
+      await new Promise<void>((resolve) =>
+        chrome.storage.local.set(
+          { ica_rebuild_cart: JSON.stringify({ items, targetStoreId }) },
+          resolve
+        )
+      );
+      const tab = await chrome.tabs.create({
+        url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
+      });
+
+      const rebuildItems = items;
+      const rebuildStoreId = targetStoreId;
+
+      const listener = (changedTabId: number, info: { status?: string }) => {
+        if (changedTabId !== tab.id || info.status !== "complete") return;
+        chrome.tabs.onUpdated.removeListener(listener);
+        chrome.storage.local.remove(["ica_rebuild_cart"]);
+
+        // First inject the rebuildCart module, then call rebuildCart()
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id! },
+          world: "MAIN",
+          files: ["content/rebuildCart.js"],
+        }).then(() =>
+          chrome.scripting.executeScript({
+            target: { tabId: tab.id! },
+            world: "MAIN",
+            func: (items: unknown, storeId: string) => {
+              (window as any).__icaRebuildCart(items, storeId);
+            },
+            args: [rebuildItems, rebuildStoreId],
+          })
+        ).catch((e) => console.error("inject failed", e));
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+
       sendResponse({ ok: true });
       return;
     }

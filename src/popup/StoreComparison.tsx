@@ -1,5 +1,5 @@
 import React from "react";
-import type { ComparisonResult, StorePrice } from "../api/types";
+import type { ComparisonResult, StorePrice, RebuildItem } from "../api/types";
 
 const FORMAT_LABEL: Record<string, string> = {
   kvantum: "Kvantum",
@@ -37,19 +37,38 @@ export default function StoreComparison({ result }: { result: ComparisonResult }
   const currentStore = stores.find((s) => s.storeId === currentStoreId);
   const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
 
+  function openCheapestCart() {
+    const items: RebuildItem[] = cartItems.map((i) => ({
+      productId: i.productId,
+      retailerProductId: i.retailerProductId,
+      quantity: i.quantity,
+      name: i.name,
+    }));
+    chrome.runtime.sendMessage(
+      { type: "OPEN_CHEAPEST_CART", items, targetStoreId: cheapestStoreId },
+      () => { /* wait for ack before popup closes */ }
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Summary banner */}
       {savingVsCurrent > 0 && cheapestStore && (
-        <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+        <div className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-2">
           <p className="text-sm font-semibold text-green-800">
             Du kan spara{" "}
             <span className="text-green-600">{formatPrice(savingVsCurrent)} kr</span>
           </p>
-          <p className="text-xs text-green-700 mt-0.5">
+          <p className="text-xs text-green-700">
             Handla hos {cheapestStore.storeName} istället för{" "}
             {currentStore?.storeName ?? "nuvarande butik"}
           </p>
+          <button
+            onClick={openCheapestCart}
+            className="w-full bg-green-600 hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded transition-colors"
+          >
+            Öppna billigaste korgen →
+          </button>
         </div>
       )}
 
