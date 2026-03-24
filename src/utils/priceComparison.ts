@@ -80,14 +80,27 @@ export function buildStorePrice(
       : undefined;
 
     if (found) {
-      // Prefer member-aware iframe price when available (price.current.amount from
-      // the SPA Redux state includes ICA-card discounts; bulk catalog does not).
+      // Merge catalog price and search-API price by taking the lower of the two.
+      //
+      // Catalog (bulk v5) uses price.current.amount which captures single-item
+      // campaigns (e.g. "54,90 kr/st", "25 kr/kg") reliably.
+      //
+      // Search-API (v6 fetch) captures stammis / multi-buy deals ("2 för 135 kr")
+      // but returns price.amount (regular shelf price) for single-item campaigns —
+      // so it would regress those if we blindly preferred it.
+      //
+      // Taking min() is always correct:
+      //   • Single-item campaign → catalog wins (lower)
+      //   • Stammis multi-buy   → fetch wins (lower)
       const ir = item.retailerProductId
         ? iframeResults?.get(item.retailerProductId)
         : undefined;
       const catalogPrice = effectivePrice(found);
+      const fetchedPrice = ir?.available && ir.price !== null ? ir.price : null;
       const price =
-        ir?.available && ir.price !== null ? ir.price : catalogPrice;
+        catalogPrice !== null && fetchedPrice !== null
+          ? Math.min(catalogPrice, fetchedPrice)
+          : fetchedPrice ?? catalogPrice;
       if (price === null) {
         return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
       }
