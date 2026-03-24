@@ -7,6 +7,7 @@ import {
   buildProductMatches,
   buildStorePrice,
   buildComparisonResult,
+  effectivePrice,
 } from "../utils/priceComparison";
 import type {
   StoredState,
@@ -14,6 +15,7 @@ import type {
   RebuildSessionState,
   ComparisonSessionCache,
   ComparisonProgressState,
+  Product,
 } from "../api/types";
 import {
   fingerprintFromProductMatches,
@@ -139,9 +141,16 @@ async function iframeLookupInMainWorld(
       if (i >= jobs.length) break;
       const job = jobs[i];
       try {
-        // Use first word of product name as search term (brand) — short query
-        // returns results faster and reliably includes the product.
-        const q = encodeURIComponent(job.productName.split(" ")[0] ?? job.productName);
+        // Use first 2 letter-starting words as search term — more specific than
+        // a single word but still broad enough for the API to return a match.
+        // Single-word searches like "Kaffe" can return 30 unrelated products and
+        // miss the specific item (e.g. "Kaffe Ebony Mörkrost 450g Gevalia").
+        // We filter out tokens starting with digits (weights: "450g", "33cl", "1-pack").
+        const parts = job.productName
+          .split(/\s+/)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((w: any) => /^[a-zA-ZåäöÅÄÖ]/.test(w));
+        const q = encodeURIComponent(parts.slice(0, 2).join(" ") || job.productName);
         const url =
           `/stores/${job.storeId}/api/webproductpagews/v6/product-pages/search` +
           `?q=${q}&maxPageSize=30&maxProductsToDecorate=30&tag=web`;
@@ -161,28 +170,47 @@ async function iframeLookupInMainWorld(
         );
         if (!match) continue;
 
-        // Base single-unit price
-        const raw: string = match.price?.amount ?? "";
-        const singleUnitAmount = parseFloat(raw);
+        // Take the lower of price.amount (regular shelf) and price.current.amount
+        // (active campaign price), if both are present in the v6 response.
+        // price.current.amount captures single-item stammispriser ("20 kr/st") for
+        // products not in the bulk catalogue — where Math.min(catalog, fetch)
+        // cannot help since catalogPrice would be null.
+        const regularRaw: string = match.price?.amount ?? "";
+        const currentRaw: string = match.price?.current?.amount ?? "";
+        const regularAmount = parseFloat(regularRaw);
+        const currentAmount = parseFloat(currentRaw);
         let price: number | null =
-          isFinite(singleUnitAmount) && singleUnitAmount >= 0 ? singleUnitAmount : null;
+          isFinite(regularAmount) && regularAmount >= 0 ? regularAmount : null;
+        if (isFinite(currentAmount) && currentAmount >= 0) {
+          price = price !== null ? Math.min(price, currentAmount) : currentAmount;
+        }
 
-        // Check promotions for stammis / multi-buy deals ("2 för 135 kr" etc.).
-        // Apply the deal price only when the cart quantity meets the threshold.
+        // Check promotions for deals. Two formats handled:
+        //   "N för X kr"  — multi-buy stammis/campaigns ("2 för 135 kr")
+        //   "X kr/st"     — single-unit named campaigns ("20 kr/st", "54,90 kr/st")
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         for (const promo of (match.promotions ?? []) as any[]) {
+          const desc: string = promo.description ?? "";
           const requiredQty: number = promo.requiredProductQuantity ?? 0;
+
+          // "N för X kr" — only apply when cart quantity meets the group threshold
           if (requiredQty > 0 && job.quantity >= requiredQty) {
-            // Match "N för X kr" or "N för X,XX kr" (Swedish decimal comma)
-            const m = (promo.description ?? "").match(
-              /\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i
-            );
+            const m = desc.match(/\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i);
             if (m) {
               const totalForGroup = parseFloat(m[1].replace(",", "."));
               if (isFinite(totalForGroup) && totalForGroup > 0) {
                 const dealPerUnit = totalForGroup / requiredQty;
                 if (price === null || dealPerUnit < price) price = dealPerUnit;
               }
+            }
+          }
+
+          // "X kr/st" — single-unit named campaign, always applicable
+          const mPerUnit = desc.match(/([\d,.]+)\s*kr\s*\/\s*st/i);
+          if (mPerUnit) {
+            const unitPrice = parseFloat(mPerUnit[1].replace(",", "."));
+            if (isFinite(unitPrice) && unitPrice > 0 && (price === null || unitPrice < price)) {
+              price = unitPrice;
             }
           }
         }
@@ -216,24 +244,162 @@ async function findIcaTabId(): Promise<number | null> {
   }
 }
 
+// ─── Fast cart rebuild (injected into MAIN world) ─────────────────────────────
+
 /**
- * Self-contained: reads name + retailerProductId for given productIds from the
- * ICA tab's Redux productEntities. ICA's SPA loads ALL basket items' product
- * data into productEntities on init — so this works even for items not in the
- * 309 bulk/campaign products.
+ * Self-contained — injected via chrome.scripting.executeScript world:"MAIN".
+ * Calls ICA's apply-quantity API directly instead of simulating DOM clicks.
+ * All items are sent in a single POST → rebuild completes in ~1 second.
+ *
+ * Auth: CSRF token + session cookies available in MAIN world (same-origin).
+ * After success, navigates the tab to the target store so the user sees
+ * their new cart immediately.
+ */
+async function applyCartInMainWorld(
+  items: Array<{ productId: string; quantity: number; name: string }>,
+  storeId: string,
+  storeName: string
+): Promise<void> {
+  function showOverlay(msg: string) {
+    let el = document.getElementById("ica-rebuild-overlay");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "ica-rebuild-overlay";
+      el.style.cssText = [
+        "position:fixed", "top:16px", "right:16px", "z-index:99999",
+        "background:#1a5c2e", "color:#fff", "padding:12px 16px",
+        "border-radius:8px", "font:14px/1.4 system-ui,sans-serif",
+        "box-shadow:0 4px 12px rgba(0,0,0,.25)", "max-width:320px",
+        "white-space:pre-line",
+      ].join(";");
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+  }
+
+  function removeOverlay() {
+    document.getElementById("ica-rebuild-overlay")?.remove();
+  }
+
+  function post(msg: object) {
+    window.postMessage({ __icaExt: true, ...msg }, "*");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const state = (window as any).__INITIAL_STATE__;
+  const csrf: string = state?.session?.csrf?.token ?? "";
+  const version: string = state?.session?.metadata?.assetVersion ?? "";
+
+  post({ type: "REBUILD_STARTED", total: items.length, storeName });
+  showOverlay(`Bygger varukorg hos ${storeName}…`);
+
+  if (!csrf) {
+    post({
+      type: "REBUILD_COMPLETE",
+      added: 0,
+      failed: items.length,
+      failedItems: items.map((i) => i.name),
+    });
+    showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
+    setTimeout(removeOverlay, 6000);
+    return;
+  }
+
+  try {
+    const resp = await fetch(
+      `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "ecom-request-source": "web",
+          ...(version ? { "ecom-request-source-version": version } : {}),
+        },
+        body: JSON.stringify(
+          items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
+        ),
+      }
+    );
+
+    if (resp.ok) {
+      post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
+      showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
+      setTimeout(removeOverlay, 3000);
+      // Navigate tab to target store so the user sees their new cart
+      setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
+    } else {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : "okänt fel";
+    post({
+      type: "REBUILD_COMPLETE",
+      added: 0,
+      failed: items.length,
+      failedItems: items.map((i) => i.name),
+    });
+    showOverlay(`Fel vid återskapning:\n${errMsg}`);
+    setTimeout(removeOverlay, 8000);
+  }
+}
+
+/**
+ * Self-contained: reads name + retailerProductId for given productIds.
+ *
+ * Checks three Redux state paths in priority order:
+ *   1. data.products.productEntities — ICA's SPA loads all cart-item product
+ *      data here on init; covers most products.
+ *   2. data.basket.items (+ common aliases) — the active cart in Redux state;
+ *      contains retailerProductId for items not yet in productEntities
+ *      (e.g. newly added items, non-standard catalog products).
+ *   3. Fallback: returns null for both fields (will show as unavailable).
  */
 function readProductEntitiesInMainWorld(
   productIds: string[]
 ): Array<{ productId: string; retailerProductId: string | null; name: string | null }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const entities: Record<string, any> =
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (window as any).__INITIAL_STATE__?.data?.products?.productEntities ?? {};
-  return productIds.map((id) => ({
-    productId: id,
-    retailerProductId: entities[id]?.retailerProductId ?? null,
-    name: entities[id]?.name ?? null,
-  }));
+  const state = (window as any).__INITIAL_STATE__;
+
+  // Path 1: productEntities (keyed by productId)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entities: Record<string, any> = state?.data?.products?.productEntities ?? {};
+
+  // Path 2: basket items — try several known Redux state shapes
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const basketItems: any[] =
+    state?.data?.basket?.items ??
+    state?.data?.cart?.items ??
+    state?.basket?.items ??
+    state?.cart?.items ??
+    [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const basketMap = new Map<string, any>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const bi of basketItems as any[]) {
+    const pid = bi.productId ?? bi.id;
+    if (pid) basketMap.set(pid, bi);
+  }
+
+  return productIds.map((id) => {
+    const entity = entities[id];
+    const bi = basketMap.get(id);
+    const retailerProductId =
+      entity?.retailerProductId ??
+      bi?.retailerProductId ??
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bi?.product as any)?.retailerProductId ??
+      null;
+    const name =
+      entity?.name ??
+      bi?.name ??
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bi?.product as any)?.name ??
+      bi?.title ??
+      null;
+    return { productId: id, retailerProductId, name };
+  });
 }
 
 // ─── Comparison logic ────────────────────────────────────────────────────────
@@ -276,8 +442,10 @@ async function runComparison(
         type EntityEntry = { productId: string; retailerProductId: string | null; name: string | null };
         for (const e of (injected[0]?.result ?? []) as EntityEntry[]) {
           const item = cartItems.find((i) => i.productId === e.productId);
-          if (item && e.retailerProductId) {
-            item.retailerProductId = e.retailerProductId;
+          if (item) {
+            // Update retailerProductId and name independently — a product may
+            // have a known name but still lack retailerProductId (or vice versa).
+            if (e.retailerProductId) item.retailerProductId = e.retailerProductId;
             if (!item.name && e.name) item.name = e.name;
           }
         }
@@ -355,9 +523,13 @@ async function runComparison(
 
   // Collect iframe jobs:
   //   1. Items NOT found in the store's bulk catalog (availability unknown)
-  //   2. Items WITH a member/ICA-card discount in the home store — the bulk catalog
-  //      only reflects campaign prices; the SPA search (price.current.amount) also
-  //      includes personalized discounts for the logged-in user.
+  //   2. Items WITH a member/ICA-card discount (finalPrice < price in cart)
+  //   3. Items where the bulk catalog price > the cart's actual price — this
+  //      catches named campaign deals like "20 kr/st" where ICA's cart API
+  //      returns the deal price directly as price.amount (no separate finalPrice),
+  //      so hasMemberDiscount is never set, yet the v5 bulk catalog shows the
+  //      regular shelf price for non-featured campaign variants (e.g. Yoghurt
+  //      Skogsbär when only Jordgubb is the "featured" campaign product).
   // Deduplicate per (storeId, retailerProductId) to avoid double lookups.
   type IframeJob = { storeId: string; productName: string; retailerProductId: string; quantity: number };
   const iframeJobs: IframeJob[] = [];
@@ -366,11 +538,31 @@ async function runComparison(
     const bulkRids = new Set(
       products.map((p) => p.retailerProductId).filter((id): id is string => !!id)
     );
+    // Build retailerProductId → Product map for catalog-vs-cart price check
+    const bulkMap = new Map<string, Product>();
+    for (const p of products) {
+      if (p.retailerProductId) bulkMap.set(p.retailerProductId, p);
+    }
     for (const item of productMatches) {
       if (!item.retailerProductId) continue;
       const notInBulk = !bulkRids.has(item.retailerProductId);
       const needsMemberPrice = item.hasMemberDiscount === true;
-      if (notInBulk || needsMemberPrice) {
+
+      // Trigger search when catalog effective price exceeds the cart price
+      // by more than 1 cent — the catalog may be showing regular price while
+      // the customer's actual price includes a named campaign discount.
+      let catalogMissesDiscount = false;
+      if (!notInBulk && item.currentPrice !== null) {
+        const bp = bulkMap.get(item.retailerProductId);
+        if (bp) {
+          const ep = effectivePrice(bp);
+          if (ep !== null && ep > item.currentPrice + 0.01) {
+            catalogMissesDiscount = true;
+          }
+        }
+      }
+
+      if (notInBulk || needsMemberPrice || catalogMissesDiscount) {
         const key = `${store.accountId}:${item.retailerProductId}`;
         if (!addedIframeKeys.has(key)) {
           addedIframeKeys.add(key);
@@ -582,17 +774,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
-    if (message.type === "GET_REBUILD_CART") {
-      const result = await chrome.storage.local.get(["ica_rebuild_cart"]);
-      const raw = result.ica_rebuild_cart;
-      const data =
-        typeof raw === "string" && raw.length > 0 ? JSON.parse(raw) : null;
-      // Clear after reading so it's only used once
-      chrome.storage.local.remove(["ica_rebuild_cart"]);
-      sendResponse(data);
-      return;
-    }
-
     if (message.type === "SAVE_ZIP") {
       await saveState({ zipCode: message.zipCode });
       sendResponse({ ok: true });
@@ -601,49 +782,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === "OPEN_CHEAPEST_CART") {
       const { items, targetStoreId, targetStoreName } = message as {
-        items: unknown;
+        items: Array<{ productId: string; quantity: number; name: string }>;
         targetStoreId: string;
         targetStoreName?: string;
       };
-      await new Promise<void>((resolve) =>
-        chrome.storage.local.set(
-          { ica_rebuild_cart: JSON.stringify({ items, targetStoreId }) },
-          resolve
-        )
-      );
-      const tab = await chrome.tabs.create({
-        url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
-      });
+      const storeName =
+        typeof targetStoreName === "string" && targetStoreName.length > 0
+          ? targetStoreName
+          : "Butik";
 
-      const rebuildItems = items;
-      const rebuildStoreId = targetStoreId;
-
-      const listener = (changedTabId: number, info: { status?: string }) => {
-        if (changedTabId !== tab.id || info.status !== "complete") return;
-        chrome.tabs.onUpdated.removeListener(listener);
-        chrome.storage.local.remove(["ica_rebuild_cart"]);
-
-        // First inject the rebuildCart module, then call rebuildCart()
-        const storeLabel =
-          typeof targetStoreName === "string" && targetStoreName.length > 0
-            ? targetStoreName
-            : "Butik";
+      const existingTabId = await findIcaTabId();
+      if (existingTabId !== null) {
+        // Reuse the open ICA tab — fastest path, no navigation needed before inject
         chrome.scripting.executeScript({
-          target: { tabId: tab.id! },
+          target: { tabId: existingTabId },
           world: "MAIN",
-          files: ["content/rebuildCart.js"],
-        }).then(() =>
+          func: applyCartInMainWorld,
+          args: [items, targetStoreId, storeName],
+        }).catch((e) => console.error("applyCartInMainWorld failed", e));
+      } else {
+        // No ICA tab open — create one at the target store and inject after load
+        const tab = await chrome.tabs.create({
+          url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
+        });
+        const listener = (changedTabId: number, info: { status?: string }) => {
+          if (changedTabId !== tab.id || info.status !== "complete") return;
+          chrome.tabs.onUpdated.removeListener(listener);
           chrome.scripting.executeScript({
             target: { tabId: tab.id! },
             world: "MAIN",
-            func: (items: unknown, storeId: string, name: string) => {
-              (window as any).__icaRebuildCart(items, storeId, name);
-            },
-            args: [rebuildItems, rebuildStoreId, storeLabel],
-          })
-        ).catch((e) => console.error("inject failed", e));
-      };
-      chrome.tabs.onUpdated.addListener(listener);
+            func: applyCartInMainWorld,
+            args: [items, targetStoreId, storeName],
+          }).catch((e) => console.error("applyCartInMainWorld failed", e));
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      }
 
       sendResponse({ ok: true });
       return;
