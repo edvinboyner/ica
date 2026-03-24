@@ -7,6 +7,7 @@ import {
   buildProductMatches,
   buildStorePrice,
   buildComparisonResult,
+  effectivePrice,
 } from "../utils/priceComparison";
 import type {
   StoredState,
@@ -14,6 +15,7 @@ import type {
   RebuildSessionState,
   ComparisonSessionCache,
   ComparisonProgressState,
+  Product,
 } from "../api/types";
 import {
   fingerprintFromProductMatches,
@@ -183,22 +185,32 @@ async function iframeLookupInMainWorld(
           price = price !== null ? Math.min(price, currentAmount) : currentAmount;
         }
 
-        // Check promotions for stammis / multi-buy deals ("2 för 135 kr" etc.).
-        // Apply the deal price only when the cart quantity meets the threshold.
+        // Check promotions for deals. Two formats handled:
+        //   "N för X kr"  — multi-buy stammis/campaigns ("2 för 135 kr")
+        //   "X kr/st"     — single-unit named campaigns ("20 kr/st", "54,90 kr/st")
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         for (const promo of (match.promotions ?? []) as any[]) {
+          const desc: string = promo.description ?? "";
           const requiredQty: number = promo.requiredProductQuantity ?? 0;
+
+          // "N för X kr" — only apply when cart quantity meets the group threshold
           if (requiredQty > 0 && job.quantity >= requiredQty) {
-            // Match "N för X kr" or "N för X,XX kr" (Swedish decimal comma)
-            const m = (promo.description ?? "").match(
-              /\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i
-            );
+            const m = desc.match(/\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i);
             if (m) {
               const totalForGroup = parseFloat(m[1].replace(",", "."));
               if (isFinite(totalForGroup) && totalForGroup > 0) {
                 const dealPerUnit = totalForGroup / requiredQty;
                 if (price === null || dealPerUnit < price) price = dealPerUnit;
               }
+            }
+          }
+
+          // "X kr/st" — single-unit named campaign, always applicable
+          const mPerUnit = desc.match(/([\d,.]+)\s*kr\s*\/\s*st/i);
+          if (mPerUnit) {
+            const unitPrice = parseFloat(mPerUnit[1].replace(",", "."));
+            if (isFinite(unitPrice) && unitPrice > 0 && (price === null || unitPrice < price)) {
+              price = unitPrice;
             }
           }
         }
@@ -511,9 +523,13 @@ async function runComparison(
 
   // Collect iframe jobs:
   //   1. Items NOT found in the store's bulk catalog (availability unknown)
-  //   2. Items WITH a member/ICA-card discount in the home store — the bulk catalog
-  //      only reflects campaign prices; the SPA search (price.current.amount) also
-  //      includes personalized discounts for the logged-in user.
+  //   2. Items WITH a member/ICA-card discount (finalPrice < price in cart)
+  //   3. Items where the bulk catalog price > the cart's actual price — this
+  //      catches named campaign deals like "20 kr/st" where ICA's cart API
+  //      returns the deal price directly as price.amount (no separate finalPrice),
+  //      so hasMemberDiscount is never set, yet the v5 bulk catalog shows the
+  //      regular shelf price for non-featured campaign variants (e.g. Yoghurt
+  //      Skogsbär when only Jordgubb is the "featured" campaign product).
   // Deduplicate per (storeId, retailerProductId) to avoid double lookups.
   type IframeJob = { storeId: string; productName: string; retailerProductId: string; quantity: number };
   const iframeJobs: IframeJob[] = [];
@@ -522,11 +538,31 @@ async function runComparison(
     const bulkRids = new Set(
       products.map((p) => p.retailerProductId).filter((id): id is string => !!id)
     );
+    // Build retailerProductId → Product map for catalog-vs-cart price check
+    const bulkMap = new Map<string, Product>();
+    for (const p of products) {
+      if (p.retailerProductId) bulkMap.set(p.retailerProductId, p);
+    }
     for (const item of productMatches) {
       if (!item.retailerProductId) continue;
       const notInBulk = !bulkRids.has(item.retailerProductId);
       const needsMemberPrice = item.hasMemberDiscount === true;
-      if (notInBulk || needsMemberPrice) {
+
+      // Trigger search when catalog effective price exceeds the cart price
+      // by more than 1 cent — the catalog may be showing regular price while
+      // the customer's actual price includes a named campaign discount.
+      let catalogMissesDiscount = false;
+      if (!notInBulk && item.currentPrice !== null) {
+        const bp = bulkMap.get(item.retailerProductId);
+        if (bp) {
+          const ep = effectivePrice(bp);
+          if (ep !== null && ep > item.currentPrice + 0.01) {
+            catalogMissesDiscount = true;
+          }
+        }
+      }
+
+      if (notInBulk || needsMemberPrice || catalogMissesDiscount) {
         const key = `${store.accountId}:${item.retailerProductId}`;
         if (!addedIframeKeys.has(key)) {
           addedIframeKeys.add(key);
