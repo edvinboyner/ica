@@ -27,34 +27,32 @@ export async function fetchStoresForZip(zipCode: string): Promise<Store[]> {
 }
 
 /**
- * Paginate through the full product catalogue for a store.
- * Stops when a page returns fewer items than the limit.
+ * Fetch the product catalogue for a store using two parallel requests (tag=web + tag=lihp).
+ * The endpoint always returns the same ~300 handpicked products regardless of offset/pagination,
+ * so we run both tags in parallel and deduplicate on retailerProductId (~309 unique products).
  */
 export async function fetchAllProductsForStore(storeId: string): Promise<Product[]> {
-  const products: Product[] = [];
-  const limit = 50;
-  let offset = 0;
+  const base =
+    `${SHOP_API_BASE}/${storeId}/api/webproductpagews/v5/product-pages?limit=300&offset=0`;
+  const [r1, r2] = await Promise.all([
+    apiFetch<ProductPagesResponse>(`${base}&tag=web`).catch(() => null),
+    apiFetch<ProductPagesResponse>(`${base}&tag=lihp`).catch(() => null),
+  ]);
 
-  while (true) {
-    const url =
-      `${SHOP_API_BASE}/${storeId}/api/webproductpagews/v5/product-pages` +
-      `?limit=${limit}&offset=${offset}&tag=web&tag=lihp`;
-    let data: ProductPagesResponse;
-    try {
-      data = await apiFetch<ProductPagesResponse>(url);
-    } catch {
-      break;
-    }
-    let count = 0;
-    for (const g of data.productGroups ?? []) {
+  const seen = new Set<string>();
+  const products: Product[] = [];
+  for (const data of [r1, r2]) {
+    for (const g of data?.productGroups ?? []) {
       for (const pw of g.products ?? []) {
-        if (pw.product) { products.push(pw.product); count++; }
+        if (!pw.product) continue;
+        const key = pw.product.retailerProductId ?? pw.product.productId;
+        if (!seen.has(key)) {
+          seen.add(key);
+          products.push(pw.product);
+        }
       }
     }
-    if (count < limit) break;
-    offset += limit;
   }
-
   return products;
 }
 

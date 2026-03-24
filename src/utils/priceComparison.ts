@@ -47,34 +47,51 @@ export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
 export function buildStorePrice(
   store: Store,
   cartItems: ProductMatch[],
-  storeProducts: Product[]
+  storeProducts: Product[],
+  iframeResults?: Map<string, { price: number | null; available: boolean }>
 ): StorePrice {
-  // Build a fast lookup map: productId -> product
+  // Key by retailerProductId (stable cross-store identifier)
   const productMap = new Map<string, Product>();
   for (const p of storeProducts) {
-    productMap.set(p.productId, p);
+    if (p.retailerProductId) productMap.set(p.retailerProductId, p);
   }
 
   let total = 0;
   let availableCount = 0;
 
   const products = cartItems.map((item) => {
-    const found = productMap.get(item.productId);
-    const price = found ? effectivePrice(found) : null;
-    if (price === null) {
-      return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
+    const found = item.retailerProductId
+      ? productMap.get(item.retailerProductId)
+      : undefined;
+
+    if (found) {
+      const price = effectivePrice(found);
+      if (price === null) {
+        return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
+      }
+      const reg = regularPrice(found);
+      total += price * item.quantity;
+      availableCount++;
+      return {
+        productId: item.productId,
+        price,
+        // Only set ordinaryPrice when there's an actual discount
+        ordinaryPrice: reg !== null && reg > price ? reg : null,
+        available: true,
+      };
     }
-    const reg = regularPrice(found!);
-    const lineTotal = price * item.quantity;
-    total += lineTotal;
-    availableCount++;
-    return {
-      productId: item.productId,
-      price,
-      // Only set ordinaryPrice when there's an actual discount
-      ordinaryPrice: reg !== null && reg > price ? reg : null,
-      available: true,
-    };
+
+    // Iframe-fallback for products not found in bulk catalog
+    const ir = item.retailerProductId
+      ? iframeResults?.get(item.retailerProductId)
+      : undefined;
+    if (ir && ir.available && ir.price !== null) {
+      total += ir.price * item.quantity;
+      availableCount++;
+      return { productId: item.productId, price: ir.price, ordinaryPrice: null, available: true };
+    }
+
+    return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
   });
 
   return {
