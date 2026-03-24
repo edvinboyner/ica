@@ -100,7 +100,7 @@ async function saveState(patch: Partial<StoredState>) {
  * overwhelming the browser when hundreds of lookups are needed across many stores.
  */
 async function iframeLookupInMainWorld(
-  jobs: Array<{ storeId: string; productName: string; retailerProductId: string }>
+  jobs: Array<{ storeId: string; productName: string; retailerProductId: string; quantity: number }>
 ): Promise<
   Array<{
     storeId: string;
@@ -113,6 +113,7 @@ async function iframeLookupInMainWorld(
     storeId: string;
     productName: string;
     retailerProductId: string;
+    quantity: number;
   }) {
     return new Promise<{
       storeId: string;
@@ -154,8 +155,32 @@ async function iframeLookupInMainWorld(
             ) as any;
             const raw: string =
               match?.price?.current?.amount ?? match?.price?.amount ?? "";
-            const amount = parseFloat(raw);
-            const price = isFinite(amount) && amount >= 0 ? amount : null;
+            const singleUnitAmount = parseFloat(raw);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let price: number | null = isFinite(singleUnitAmount) && singleUnitAmount >= 0 ? singleUnitAmount : null;
+
+            // Check offers for multi-buy / stammis deals: "2 för 135 kr", "6 för 20 kr" etc.
+            // The offer is only applied when the user's cart quantity meets the threshold.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const offers: any[] = match?.offers ?? [];
+            for (const offer of offers) {
+              const requiredQty: number = offer?.requiredProductQuantity ?? 0;
+              if (requiredQty > 0 && job.quantity >= requiredQty) {
+                const desc: string = offer?.description ?? "";
+                // Match "N för X kr" or "N för X,XX kr" (Swedish decimal comma)
+                const m = desc.match(/\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i);
+                if (m) {
+                  const totalForGroup = parseFloat(m[1].replace(",", "."));
+                  if (isFinite(totalForGroup) && totalForGroup > 0) {
+                    const dealPerUnit = totalForGroup / requiredQty;
+                    if (price === null || dealPerUnit < price) {
+                      price = dealPerUnit;
+                    }
+                  }
+                }
+              }
+            }
+
             resolve({
               storeId: job.storeId,
               retailerProductId: job.retailerProductId,
@@ -384,7 +409,7 @@ async function runComparison(
   //      only reflects campaign prices; the SPA search (price.current.amount) also
   //      includes personalized discounts for the logged-in user.
   // Deduplicate per (storeId, retailerProductId) to avoid double lookups.
-  type IframeJob = { storeId: string; productName: string; retailerProductId: string };
+  type IframeJob = { storeId: string; productName: string; retailerProductId: string; quantity: number };
   const iframeJobs: IframeJob[] = [];
   const addedIframeKeys = new Set<string>();
   for (const { store, products } of storeBulkData) {
@@ -403,6 +428,7 @@ async function runComparison(
             storeId: store.accountId,
             productName: item.name,
             retailerProductId: item.retailerProductId,
+            quantity: item.quantity,
           });
         }
       }
