@@ -100,10 +100,16 @@ export default function StoreComparison({
   comparisonUpdatedAt: number | null;
   onRefreshComparison: () => void;
 }) {
-  const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent } =
+  const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent, actualCartTotal } =
     result;
 
+  // Show an info note when actualCartTotal < current store catalog total — meaning
+  // the user benefits from stammis / multi-buy deals that don't appear in the catalog.
   const currentStore = stores.find((s) => s.storeId === currentStoreId);
+  const hasHiddenDeals =
+    currentStore !== undefined &&
+    actualCartTotal < currentStore.totalPrice - 0.01;
+
   const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
 
   function openCheapestCart() {
@@ -193,6 +199,19 @@ export default function StoreComparison({
       )}
 
       {rebuildState && <RebuildProgressPanel state={rebuildState} />}
+
+      {/* Hidden-deals info: stammis / multi-buy not visible in catalogue */}
+      {hasHiddenDeals && (
+        <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] text-blue-800 leading-snug space-y-0.5">
+          <p>
+            <span className="font-semibold">Din korg kostar faktiskt {formatPrice(actualCartTotal)} kr</span>
+            {" "}(inkl. stammispris &amp; flerkampanjer).
+          </p>
+          <p className="text-blue-600">
+            Jämförelsepriser nedan baseras på katalog — faktisk besparing kan vara större.
+          </p>
+        </div>
+      )}
 
       {/* Store list */}
       <div className="space-y-2">

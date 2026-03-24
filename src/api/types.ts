@@ -39,17 +39,20 @@ export interface ProductWrapper {
 }
 
 export interface ProductPrice {
+  /** Regular/shelf price amount */
   amount: string;
   currency: string;
+  /** Current effective price after campaigns/discounts — prefer this over amount */
+  current?: { amount: string; currency?: string };
 }
 
 export interface Product {
   productId: string;
   retailerProductId?: string;
   name: string;
-  /** Regular shelf price */
+  /** Price object — use price.current.amount (campaign price) over price.amount (shelf price) */
   price?: ProductPrice;
-  /** Campaign/promo price — present when product is on sale */
+  /** Legacy promo price field — superseded by price.current */
   promoPrice?: ProductPrice;
   imageUrl?: string;
 }
@@ -62,6 +65,12 @@ export interface ProductMatch {
   quantity: number;
   /** Effective unit price in current store (after discounts) */
   currentPrice: number | null;
+  /**
+   * True when the cart's finalPrice < price for this item — indicates an
+   * ICA-card / loyalty discount that the bulk catalog doesn't reflect.
+   * Used to trigger iframe lookups for this item in all stores.
+   */
+  hasMemberDiscount?: boolean;
   imageUrl?: string;
 }
 
@@ -86,6 +95,13 @@ export interface ComparisonResult {
   currentStoreId: string;
   cheapestStoreId: string;
   savingVsCurrent: number;
+  /**
+   * Actual home-store cart total from cart API finalPrices — includes
+   * stammis / multi-buy deals (2 för X kr) that aren't visible in the
+   * product catalogue. Used for display only; comparison totals are always
+   * catalogue-based so all stores are on equal footing.
+   */
+  actualCartTotal: number;
 }
 
 // Content script message types

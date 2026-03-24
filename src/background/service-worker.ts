@@ -378,57 +378,104 @@ async function runComparison(
     throw new Error("NO_STORE_DATA");
   }
 
-  // Collect iframe jobs: items missing from bulk catalog per store
+  // Collect iframe jobs:
+  //   1. Items NOT found in the store's bulk catalog (availability unknown)
+  //   2. Items WITH a member/ICA-card discount in the home store — the bulk catalog
+  //      only reflects campaign prices; the SPA search (price.current.amount) also
+  //      includes personalized discounts for the logged-in user.
+  // Deduplicate per (storeId, retailerProductId) to avoid double lookups.
   type IframeJob = { storeId: string; productName: string; retailerProductId: string };
   const iframeJobs: IframeJob[] = [];
+  const addedIframeKeys = new Set<string>();
   for (const { store, products } of storeBulkData) {
     const bulkRids = new Set(
       products.map((p) => p.retailerProductId).filter((id): id is string => !!id)
     );
     for (const item of productMatches) {
-      if (item.retailerProductId && !bulkRids.has(item.retailerProductId)) {
-        iframeJobs.push({
-          storeId: store.accountId,
-          productName: item.name,
-          retailerProductId: item.retailerProductId,
-        });
+      if (!item.retailerProductId) continue;
+      const notInBulk = !bulkRids.has(item.retailerProductId);
+      const needsMemberPrice = item.hasMemberDiscount === true;
+      if (notInBulk || needsMemberPrice) {
+        const key = `${store.accountId}:${item.retailerProductId}`;
+        if (!addedIframeKeys.has(key)) {
+          addedIframeKeys.add(key);
+          iframeJobs.push({
+            storeId: store.accountId,
+            productName: item.name,
+            retailerProductId: item.retailerProductId,
+          });
+        }
       }
     }
   }
 
-  // Iframe-fallback: run all lookups in parallel via MAIN world injection
+  // Iframe lookups: run in batches so the popup can show live progress.
+  //
+  // Strategy:
+  //   1. Pre-interleave ALL jobs globally: [s1i1, s2i1, …, sNi1, s1i2, …]
+  //      This guarantees each store gets at most 1 active iframe at a time,
+  //      even when batches are processed sequentially.
+  //   2. Slice into batches of ≈ one "round" (one job per store).
+  //      After each batch we update the progress counter in session storage
+  //      so the popup re-renders with the current count.
   type IframeResult = { storeId: string; retailerProductId: string; price: number | null; available: boolean };
   const iframeByStore = new Map<string, Map<string, { price: number | null; available: boolean }>>();
 
   if (iframeJobs.length > 0 && icaTabId !== null) {
-    await persistComparisonProgress({
-      status: "running",
-      step: "iframe_fallback",
-      current: 0,
-      total: iframeJobs.length,
-      detail: `Söker ${iframeJobs.length} saknade varor via söksidan…`,
-    });
-    {
+    // Global interleave
+    const byStoreMap = new Map<string, typeof iframeJobs>();
+    for (const job of iframeJobs) {
+      if (!byStoreMap.has(job.storeId)) byStoreMap.set(job.storeId, []);
+      byStoreMap.get(job.storeId)!.push(job);
+    }
+    const queues = [...byStoreMap.values()];
+    const maxQ = Math.max(...queues.map((q) => q.length));
+    const globalInterleaved: typeof iframeJobs = [];
+    for (let round = 0; round < maxQ; round++) {
+      for (const q of queues) {
+        if (round < q.length) globalInterleaved.push(q[round]);
+      }
+    }
+
+    // Batch size = one "round" (≈ one job per store) for natural progress steps
+    const batchSize = Math.max(storeBulkData.length, 1);
+    let iframeDone = 0;
+
+    for (let batchStart = 0; batchStart < globalInterleaved.length; batchStart += batchSize) {
+      await persistComparisonProgress({
+        status: "running",
+        step: "iframe_fallback",
+        current: iframeDone,
+        total: globalInterleaved.length,
+        detail: `Söker priser i butiker…`,
+      });
+
+      const batch = globalInterleaved.slice(batchStart, batchStart + batchSize);
       try {
         const injected = await chrome.scripting.executeScript({
           target: { tabId: icaTabId },
           world: "MAIN",
           func: iframeLookupInMainWorld,
-          args: [iframeJobs],
+          args: [batch],
         });
-        const results: IframeResult[] = injected[0]?.result ?? [];
-        for (const r of results) {
-          if (!iframeByStore.has(r.storeId)) {
-            iframeByStore.set(r.storeId, new Map());
-          }
-          iframeByStore
-            .get(r.storeId)!
-            .set(r.retailerProductId, { price: r.price, available: r.available });
+        for (const r of (injected[0]?.result ?? []) as IframeResult[]) {
+          if (!iframeByStore.has(r.storeId)) iframeByStore.set(r.storeId, new Map());
+          iframeByStore.get(r.storeId)!.set(r.retailerProductId, { price: r.price, available: r.available });
         }
       } catch {
-        // Iframe fallback failed — continue with bulk results only
+        // batch failed — continue with next
       }
+      iframeDone += batch.length;
     }
+
+    // Final tick so the bar reaches 100 %
+    await persistComparisonProgress({
+      status: "running",
+      step: "iframe_fallback",
+      current: iframeDone,
+      total: globalInterleaved.length,
+      detail: `Söker priser i butiker…`,
+    });
   }
 
   // Build final store prices (bulk + iframe merged via buildStorePrice)

@@ -8,11 +8,15 @@ import type {
 } from "../api/types";
 
 /**
- * Returns the effective unit price — promoPrice when on sale, otherwise price.
+ * Returns the effective unit price — the actual price the customer pays.
+ * Priority: price.current.amount (post-campaign) > promoPrice.amount > price.amount (shelf).
  * ICA returns amounts as strings (e.g. "30.00"), so we parse them.
  */
 export function effectivePrice(p: Product): number | null {
-  const raw = p.promoPrice?.amount ?? p.price?.amount;
+  const raw =
+    p.price?.current?.amount ??
+    p.promoPrice?.amount ??
+    p.price?.amount;
   return parseAmount(raw);
 }
 
@@ -29,10 +33,20 @@ function parseAmount(v: string | number | undefined | null): number | null {
 
 export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
   return cartItems.map((item) => {
-    const currentPrice =
-      parseAmount(item.finalPrice?.amount) ??
-      parseAmount(item.price?.amount) ??
-      null;
+    const finalAmt = parseAmount(item.finalPrice?.amount);
+    const regularAmt = parseAmount(item.price?.amount);
+    const currentPrice = finalAmt ?? regularAmt ?? null;
+
+    // Flag items that need an iframe lookup for accurate pricing:
+    //   1. finalPrice < price  → ICA-card / loyalty discount (bulk catalog doesn't know)
+    //   2. quantity > 1        → potential multi-buy deal ("2 för 85 kr" etc.)
+    //                            The bulk catalog stores regular per-unit prices for these;
+    //                            the SPA search (price.current.amount) shows the deal price.
+    const hasMemberDiscount =
+      (finalAmt !== null && regularAmt !== null && finalAmt < regularAmt) ||
+      item.quantity > 1
+        ? true
+        : undefined;
 
     return {
       productId: item.productId,
@@ -40,6 +54,7 @@ export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
       name: item.name ?? item.productId,
       quantity: item.quantity,
       currentPrice,
+      hasMemberDiscount,
     };
   });
 }
@@ -65,7 +80,14 @@ export function buildStorePrice(
       : undefined;
 
     if (found) {
-      const price = effectivePrice(found);
+      // Prefer member-aware iframe price when available (price.current.amount from
+      // the SPA Redux state includes ICA-card discounts; bulk catalog does not).
+      const ir = item.retailerProductId
+        ? iframeResults?.get(item.retailerProductId)
+        : undefined;
+      const catalogPrice = effectivePrice(found);
+      const price =
+        ir?.available && ir.price !== null ? ir.price : catalogPrice;
       if (price === null) {
         return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
       }
@@ -125,11 +147,18 @@ export function buildComparisonResult(
       ? currentStore.totalPrice - cheapestStore.totalPrice
       : 0;
 
+  // Actual home-store cost from cart finalPrices (includes stammis / 2-for-X
+  // deals that the product catalogue doesn't expose).
+  const actualCartTotal = Math.round(
+    cartItems.reduce((sum, item) => sum + (item.currentPrice ?? 0) * item.quantity, 0) * 100
+  ) / 100;
+
   return {
     cartItems,
     stores: [...stores].sort((a, b) => a.totalPrice - b.totalPrice),
     currentStoreId,
     cheapestStoreId,
     savingVsCurrent,
+    actualCartTotal,
   };
 }
