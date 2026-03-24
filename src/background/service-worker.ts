@@ -139,9 +139,16 @@ async function iframeLookupInMainWorld(
       if (i >= jobs.length) break;
       const job = jobs[i];
       try {
-        // Use first word of product name as search term (brand) — short query
-        // returns results faster and reliably includes the product.
-        const q = encodeURIComponent(job.productName.split(" ")[0] ?? job.productName);
+        // Use first 2 letter-starting words as search term — more specific than
+        // a single word but still broad enough for the API to return a match.
+        // Single-word searches like "Kaffe" can return 30 unrelated products and
+        // miss the specific item (e.g. "Kaffe Ebony Mörkrost 450g Gevalia").
+        // We filter out tokens starting with digits (weights: "450g", "33cl", "1-pack").
+        const parts = job.productName
+          .split(/\s+/)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((w: any) => /^[a-zA-ZåäöÅÄÖ]/.test(w));
+        const q = encodeURIComponent(parts.slice(0, 2).join(" ") || job.productName);
         const url =
           `/stores/${job.storeId}/api/webproductpagews/v6/product-pages/search` +
           `?q=${q}&maxPageSize=30&maxProductsToDecorate=30&tag=web`;
