@@ -325,23 +325,60 @@ async function applyCartInMainWorld(
 }
 
 /**
- * Self-contained: reads name + retailerProductId for given productIds from the
- * ICA tab's Redux productEntities. ICA's SPA loads ALL basket items' product
- * data into productEntities on init — so this works even for items not in the
- * 309 bulk/campaign products.
+ * Self-contained: reads name + retailerProductId for given productIds.
+ *
+ * Checks three Redux state paths in priority order:
+ *   1. data.products.productEntities — ICA's SPA loads all cart-item product
+ *      data here on init; covers most products.
+ *   2. data.basket.items (+ common aliases) — the active cart in Redux state;
+ *      contains retailerProductId for items not yet in productEntities
+ *      (e.g. newly added items, non-standard catalog products).
+ *   3. Fallback: returns null for both fields (will show as unavailable).
  */
 function readProductEntitiesInMainWorld(
   productIds: string[]
 ): Array<{ productId: string; retailerProductId: string | null; name: string | null }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const entities: Record<string, any> =
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (window as any).__INITIAL_STATE__?.data?.products?.productEntities ?? {};
-  return productIds.map((id) => ({
-    productId: id,
-    retailerProductId: entities[id]?.retailerProductId ?? null,
-    name: entities[id]?.name ?? null,
-  }));
+  const state = (window as any).__INITIAL_STATE__;
+
+  // Path 1: productEntities (keyed by productId)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entities: Record<string, any> = state?.data?.products?.productEntities ?? {};
+
+  // Path 2: basket items — try several known Redux state shapes
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const basketItems: any[] =
+    state?.data?.basket?.items ??
+    state?.data?.cart?.items ??
+    state?.basket?.items ??
+    state?.cart?.items ??
+    [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const basketMap = new Map<string, any>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const bi of basketItems as any[]) {
+    const pid = bi.productId ?? bi.id;
+    if (pid) basketMap.set(pid, bi);
+  }
+
+  return productIds.map((id) => {
+    const entity = entities[id];
+    const bi = basketMap.get(id);
+    const retailerProductId =
+      entity?.retailerProductId ??
+      bi?.retailerProductId ??
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bi?.product as any)?.retailerProductId ??
+      null;
+    const name =
+      entity?.name ??
+      bi?.name ??
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bi?.product as any)?.name ??
+      bi?.title ??
+      null;
+    return { productId: id, retailerProductId, name };
+  });
 }
 
 // ─── Comparison logic ────────────────────────────────────────────────────────
@@ -384,8 +421,10 @@ async function runComparison(
         type EntityEntry = { productId: string; retailerProductId: string | null; name: string | null };
         for (const e of (injected[0]?.result ?? []) as EntityEntry[]) {
           const item = cartItems.find((i) => i.productId === e.productId);
-          if (item && e.retailerProductId) {
-            item.retailerProductId = e.retailerProductId;
+          if (item) {
+            // Update retailerProductId and name independently — a product may
+            // have a known name but still lack retailerProductId (or vice versa).
+            if (e.retailerProductId) item.retailerProductId = e.retailerProductId;
             if (!item.name && e.name) item.name = e.name;
           }
         }

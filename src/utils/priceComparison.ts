@@ -51,7 +51,8 @@ export function buildProductMatches(cartItems: CartItem[]): ProductMatch[] {
     return {
       productId: item.productId,
       retailerProductId: item.retailerProductId,
-      name: item.name ?? item.productId,
+      // Fall back to "Okänd vara" rather than showing a raw UUID
+      name: item.name ?? (item.productId.includes("-") ? "Okänd vara" : item.productId),
       quantity: item.quantity,
       currentPrice,
       hasMemberDiscount,
