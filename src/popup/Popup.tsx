@@ -37,7 +37,7 @@ export default function Popup() {
     });
 
     chrome.storage.session.get(
-      ["rebuildState", "comparisonCache"],
+      ["rebuildState", "comparisonCache", "comparisonProgress"],
       (session) => {
         if (session.rebuildState) {
           setRebuildState(session.rebuildState as RebuildSessionState);
@@ -45,10 +45,19 @@ export default function Popup() {
         const cache = session.comparisonCache as
           | { timestamp: number; results: ComparisonResult }
           | undefined;
+        // Cached result takes priority — comparison is complete
         if (cache?.results) {
           setResult(cache.results);
           setComparisonUpdatedAt(cache.timestamp);
           setView("result");
+          return;
+        }
+        // No cache yet but progress exists — comparison is running
+        if (session.comparisonProgress) {
+          setComparisonProgress(
+            session.comparisonProgress as ComparisonProgressState
+          );
+          setView("loading");
         }
       }
     );
@@ -93,10 +102,14 @@ export default function Popup() {
         }
       }
       if (changes.comparisonProgress) {
-        setComparisonProgress(
+        const progress =
           (changes.comparisonProgress.newValue as ComparisonProgressState) ??
-            null
-        );
+          null;
+        setComparisonProgress(progress);
+        // If comparison starts while popup shows idle/error, switch to loading
+        if (progress) {
+          setView((v) => (v === "idle" || v === "error" ? "loading" : v));
+        }
       }
     };
     chrome.storage.session.onChanged.addListener(onChange);
