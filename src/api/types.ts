@@ -154,8 +154,8 @@ export interface ComparisonSessionCache {
 /** Shown in popup while GET_COMPARISON runs */
 export interface ComparisonProgressState {
   status: "running";
-  /** cart | stores_list | store_catalogues */
-  step: "cart" | "stores_list" | "store_catalogues";
+  /** cart | stores_list | store_catalogues | iframe_fallback */
+  step: "cart" | "stores_list" | "store_catalogues" | "iframe_fallback";
   current: number;
   total: number;
   detail?: string;

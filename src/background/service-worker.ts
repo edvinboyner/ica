@@ -90,6 +90,177 @@ async function saveState(patch: Partial<StoredState>) {
   });
 }
 
+// ─── Iframe lookup (injected into MAIN world via chrome.scripting) ───────────
+
+/**
+ * Self-contained function injected via chrome.scripting.executeScript world:"MAIN".
+ * Must not reference any module-level variables — Chrome serialises it via .toString().
+ *
+ * Uses a worker-pool pattern (MAX_CONCURRENT iframes at a time) to avoid
+ * overwhelming the browser when hundreds of lookups are needed across many stores.
+ */
+async function iframeLookupInMainWorld(
+  jobs: Array<{ storeId: string; productName: string; retailerProductId: string }>
+): Promise<
+  Array<{
+    storeId: string;
+    retailerProductId: string;
+    price: number | null;
+    available: boolean;
+  }>
+> {
+  function lookupOne(job: {
+    storeId: string;
+    productName: string;
+    retailerProductId: string;
+  }) {
+    return new Promise<{
+      storeId: string;
+      retailerProductId: string;
+      price: number | null;
+      available: boolean;
+    }>((resolve) => {
+      const iframe = document.createElement("iframe");
+      iframe.style.cssText =
+        "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;";
+      // Use only the first word of the product name as search query.
+      // A shorter/brand-only query returns results faster and is more likely
+      // to include the product (ICA's search ranks brand matches highly).
+      // Accuracy is unaffected — we still match on exact retailerProductId.
+      const searchQuery = job.productName.split(" ")[0] ?? job.productName;
+      iframe.src = `https://handlaprivatkund.ica.se/stores/${
+        job.storeId
+      }/search?q=${encodeURIComponent(searchQuery)}`;
+      document.body.appendChild(iframe);
+
+      const check = setInterval(() => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const entities: Record<string, any> =
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (iframe.contentWindow as any)?.__INITIAL_STATE__?.data?.products
+              ?.productEntities ?? {};
+          if (Object.keys(entities).length > 0) {
+            clearInterval(check);
+            try {
+              document.body.removeChild(iframe);
+            } catch {
+              /* ignore */
+            }
+            const match = Object.values(entities).find(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (p: any) => p.retailerProductId === job.retailerProductId
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ) as any;
+            const raw: string =
+              match?.price?.current?.amount ?? match?.price?.amount ?? "";
+            const amount = parseFloat(raw);
+            const price = isFinite(amount) && amount >= 0 ? amount : null;
+            resolve({
+              storeId: job.storeId,
+              retailerProductId: job.retailerProductId,
+              price,
+              // Treat as available whenever the product is found by retailerProductId —
+              // consistent with how bulk products are handled (price presence = available).
+              // ICA's `available` field is often absent or unreliable in search state.
+              available: match != null && price !== null,
+            });
+          }
+        } catch {
+          /* iframe not loaded yet — wait for next poll */
+        }
+      }, 200);
+
+      setTimeout(() => {
+        clearInterval(check);
+        try {
+          document.body.removeChild(iframe);
+        } catch {
+          /* ignore */
+        }
+        resolve({
+          storeId: job.storeId,
+          retailerProductId: job.retailerProductId,
+          price: null,
+          available: false,
+        });
+      }, 15000);
+    });
+  }
+
+  // Interleave jobs by store: [s1i1, s2i1, …, s64i1, s1i2, s2i2, …]
+  // Combined with the flat worker pool this ensures:
+  //   • At most MAX_CONCURRENT iframes at any given time
+  //   • Each store gets at most 1 active iframe at a time (no per-store rate limiting)
+  const MAX_CONCURRENT = 50;
+  const byStore = new Map<string, typeof jobs>();
+  for (const job of jobs) {
+    if (!byStore.has(job.storeId)) byStore.set(job.storeId, []);
+    byStore.get(job.storeId)!.push(job);
+  }
+  const storeQueues = [...byStore.values()];
+  const maxLen = Math.max(...storeQueues.map((q) => q.length));
+  const interleaved: typeof jobs = [];
+  for (let i = 0; i < maxLen; i++) {
+    for (const q of storeQueues) {
+      if (i < q.length) interleaved.push(q[i]);
+    }
+  }
+
+  // Flat worker pool — JavaScript is single-threaded so nextIndex++ is race-free.
+  const results: Array<{
+    storeId: string;
+    retailerProductId: string;
+    price: number | null;
+    available: boolean;
+  }> = new Array(interleaved.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= interleaved.length) break;
+      results[i] = await lookupOne(interleaved[i]);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_CONCURRENT, interleaved.length) }, worker)
+  );
+  return results;
+}
+
+async function findIcaTabId(): Promise<number | null> {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: "https://handlaprivatkund.ica.se/*",
+    });
+    return tabs[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Self-contained: reads name + retailerProductId for given productIds from the
+ * ICA tab's Redux productEntities. ICA's SPA loads ALL basket items' product
+ * data into productEntities on init — so this works even for items not in the
+ * 309 bulk/campaign products.
+ */
+function readProductEntitiesInMainWorld(
+  productIds: string[]
+): Array<{ productId: string; retailerProductId: string | null; name: string | null }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entities: Record<string, any> =
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__INITIAL_STATE__?.data?.products?.productEntities ?? {};
+  return productIds.map((id) => ({
+    productId: id,
+    retailerProductId: entities[id]?.retailerProductId ?? null,
+    name: entities[id]?.name ?? null,
+  }));
+}
+
 // ─── Comparison logic ────────────────────────────────────────────────────────
 
 async function runComparison(
@@ -107,6 +278,38 @@ async function runComparison(
   const cartItems = await fetchActiveCart(storeId);
   if (!cartItems.length) {
     throw new Error("EMPTY_CART");
+  }
+
+  // Get tab ID early — reused for both productEntities enrichment and iframe fallback
+  const icaTabId = await findIcaTabId();
+
+  // Enrich items that didn't get retailerProductId from the 309 bulk products.
+  // ICA's SPA loads ALL basket items' product data into __INITIAL_STATE__ productEntities
+  // on init, so we can always read name + retailerProductId for any cart item from there.
+  if (icaTabId !== null) {
+    const unenrichedIds = cartItems
+      .filter((i) => !i.retailerProductId)
+      .map((i) => i.productId);
+    if (unenrichedIds.length > 0) {
+      try {
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId: icaTabId },
+          world: "MAIN",
+          func: readProductEntitiesInMainWorld,
+          args: [unenrichedIds],
+        });
+        type EntityEntry = { productId: string; retailerProductId: string | null; name: string | null };
+        for (const e of (injected[0]?.result ?? []) as EntityEntry[]) {
+          const item = cartItems.find((i) => i.productId === e.productId);
+          if (item && e.retailerProductId) {
+            item.retailerProductId = e.retailerProductId;
+            if (!item.name && e.name) item.name = e.name;
+          }
+        }
+      } catch {
+        // best-effort — items without retailerProductId fall back to "saknas"
+      }
+    }
   }
 
   await persistComparisonProgress({
@@ -149,33 +352,89 @@ async function runComparison(
     detail: "Hämtar sortiment från varje butik…",
   });
 
-  let completed = 0;
-  const storeResults = await Promise.allSettled(
+  // Parallel bulk-fetch for all stores
+  let bulkCompleted = 0;
+  const bulkSettled = await Promise.allSettled(
     stores.map(async (store) => {
       const products = await fetchAllProductsForStore(store.accountId);
-      const row = buildStorePrice(store, productMatches, products);
-      completed += 1;
+      bulkCompleted += 1;
       await persistComparisonProgress({
         status: "running",
         step: "store_catalogues",
-        current: completed,
+        current: bulkCompleted,
         total: n,
         detail: store.name,
       });
-      return row;
+      return { store, products };
     })
   );
 
-  const storePrices = storeResults
-    .filter(
-      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof buildStorePrice>>> =>
-        r.status === "fulfilled"
-    )
+  type BulkEntry = { store: (typeof stores)[number]; products: Awaited<ReturnType<typeof fetchAllProductsForStore>> };
+  const storeBulkData: BulkEntry[] = bulkSettled
+    .filter((r): r is PromiseFulfilledResult<BulkEntry> => r.status === "fulfilled")
     .map((r) => r.value);
 
-  if (!storePrices.length) {
+  if (!storeBulkData.length) {
     throw new Error("NO_STORE_DATA");
   }
+
+  // Collect iframe jobs: items missing from bulk catalog per store
+  type IframeJob = { storeId: string; productName: string; retailerProductId: string };
+  const iframeJobs: IframeJob[] = [];
+  for (const { store, products } of storeBulkData) {
+    const bulkRids = new Set(
+      products.map((p) => p.retailerProductId).filter((id): id is string => !!id)
+    );
+    for (const item of productMatches) {
+      if (item.retailerProductId && !bulkRids.has(item.retailerProductId)) {
+        iframeJobs.push({
+          storeId: store.accountId,
+          productName: item.name,
+          retailerProductId: item.retailerProductId,
+        });
+      }
+    }
+  }
+
+  // Iframe-fallback: run all lookups in parallel via MAIN world injection
+  type IframeResult = { storeId: string; retailerProductId: string; price: number | null; available: boolean };
+  const iframeByStore = new Map<string, Map<string, { price: number | null; available: boolean }>>();
+
+  if (iframeJobs.length > 0 && icaTabId !== null) {
+    await persistComparisonProgress({
+      status: "running",
+      step: "iframe_fallback",
+      current: 0,
+      total: iframeJobs.length,
+      detail: `Söker ${iframeJobs.length} saknade varor via söksidan…`,
+    });
+    {
+      try {
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId: icaTabId },
+          world: "MAIN",
+          func: iframeLookupInMainWorld,
+          args: [iframeJobs],
+        });
+        const results: IframeResult[] = injected[0]?.result ?? [];
+        for (const r of results) {
+          if (!iframeByStore.has(r.storeId)) {
+            iframeByStore.set(r.storeId, new Map());
+          }
+          iframeByStore
+            .get(r.storeId)!
+            .set(r.retailerProductId, { price: r.price, available: r.available });
+        }
+      } catch {
+        // Iframe fallback failed — continue with bulk results only
+      }
+    }
+  }
+
+  // Build final store prices (bulk + iframe merged via buildStorePrice)
+  const storePrices = storeBulkData.map(({ store, products }) =>
+    buildStorePrice(store, productMatches, products, iframeByStore.get(store.accountId))
+  );
 
   return buildComparisonResult(productMatches, storePrices, storeId);
 }
