@@ -268,10 +268,13 @@ export default function Popup() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-/** True % while fetching product catalogues (parallel per store); otherwise unknown duration */
+/** True % for steps with real sub-progress; 0 for indeterminate steps */
 function comparisonProgressDeterminate(p: ComparisonProgressState): number {
-  if (p.step !== "store_catalogues" || p.total <= 0) return 0;
-  return Math.min(100, Math.round((p.current / p.total) * 100));
+  if (p.total <= 0) return 0;
+  if (p.step === "store_catalogues" || p.step === "iframe_fallback") {
+    return Math.min(100, Math.round((p.current / p.total) * 100));
+  }
+  return 0;
 }
 
 function isComparisonProgressIndeterminate(
@@ -280,7 +283,12 @@ function isComparisonProgressIndeterminate(
   if (!progress) return true;
   // Varukorg + butikslista: ingen riktig del-progress från API → glidande stapel
   if (progress.step === "cart" || progress.step === "stores_list") return true;
-  if (progress.step === "store_catalogues" && progress.total > 0 && progress.current === 0) {
+  // Deterministic once we have actual counts
+  if (
+    (progress.step === "store_catalogues" || progress.step === "iframe_fallback") &&
+    progress.total > 0 &&
+    progress.current === 0
+  ) {
     return true;
   }
   return false;
@@ -295,6 +303,16 @@ function ComparisonLoadingPanel({
   const pct = progress ? comparisonProgressDeterminate(progress) : 0;
   const label = progress?.detail ?? "Startar jämförelse…";
 
+  const hasCounts =
+    progress !== null &&
+    progress.total > 0 &&
+    (progress.step === "store_catalogues" || progress.step === "iframe_fallback");
+
+  const countLabel =
+    progress?.step === "store_catalogues"
+      ? "butiker"
+      : "sökningar";
+
   return (
     <div className="py-6 space-y-4">
       <div className="relative h-3 bg-gray-200 rounded-full overflow-hidden">
@@ -308,14 +326,10 @@ function ComparisonLoadingPanel({
         )}
       </div>
       <div className="flex justify-between text-[11px] text-gray-500 tabular-nums">
-        <span>
-          {!indeterminate && progress?.step === "store_catalogues"
-            ? `${pct}%`
-            : "…"}
-        </span>
-        {progress?.step === "store_catalogues" && progress.total > 0 ? (
+        <span>{!indeterminate && hasCounts ? `${pct}%` : "…"}</span>
+        {hasCounts ? (
           <span>
-            {progress.current}/{progress.total} butiker
+            {progress!.current}/{progress!.total} {countLabel}
           </span>
         ) : null}
       </div>

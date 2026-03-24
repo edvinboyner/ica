@@ -90,17 +90,25 @@ async function saveState(patch: Partial<StoredState>) {
   });
 }
 
-// ─── Iframe lookup (injected into MAIN world via chrome.scripting) ───────────
+// ─── Direct search-API lookup (injected into MAIN world via chrome.scripting) ─
 
 /**
  * Self-contained function injected via chrome.scripting.executeScript world:"MAIN".
  * Must not reference any module-level variables — Chrome serialises it via .toString().
  *
- * Uses a worker-pool pattern (MAX_CONCURRENT iframes at a time) to avoid
- * overwhelming the browser when hundreds of lookups are needed across many stores.
+ * Replaces the old iframe approach: instead of loading full SPA pages we call
+ * ICA's v6 search endpoint directly via fetch(). Running in MAIN world means
+ * the request is same-origin with session cookies → no WAF issues, no DOM work.
+ *
+ * Endpoint: /stores/{id}/api/webproductpagews/v6/product-pages/search
+ * Returns `decoratedProducts` with a `promotions` array that includes stammis /
+ * multi-buy deals ("2 för 135 kr", "6 för 20 kr" etc.).
+ *
+ * Uses a flat worker-pool so at most MAX_CONCURRENT requests are in-flight at
+ * once — JS is single-threaded so nextIndex++ is race-free.
  */
 async function iframeLookupInMainWorld(
-  jobs: Array<{ storeId: string; productName: string; retailerProductId: string }>
+  jobs: Array<{ storeId: string; productName: string; retailerProductId: string; quantity: number }>
 ): Promise<
   Array<{
     storeId: string;
@@ -109,123 +117,90 @@ async function iframeLookupInMainWorld(
     available: boolean;
   }>
 > {
-  function lookupOne(job: {
-    storeId: string;
-    productName: string;
-    retailerProductId: string;
-  }) {
-    return new Promise<{
-      storeId: string;
-      retailerProductId: string;
-      price: number | null;
-      available: boolean;
-    }>((resolve) => {
-      const iframe = document.createElement("iframe");
-      iframe.style.cssText =
-        "position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;";
-      // Use only the first word of the product name as search query.
-      // A shorter/brand-only query returns results faster and is more likely
-      // to include the product (ICA's search ranks brand matches highly).
-      // Accuracy is unaffected — we still match on exact retailerProductId.
-      const searchQuery = job.productName.split(" ")[0] ?? job.productName;
-      iframe.src = `https://handlaprivatkund.ica.se/stores/${
-        job.storeId
-      }/search?q=${encodeURIComponent(searchQuery)}`;
-      document.body.appendChild(iframe);
+  const MAX_CONCURRENT = 30;
 
-      const check = setInterval(() => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const entities: Record<string, any> =
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (iframe.contentWindow as any)?.__INITIAL_STATE__?.data?.products
-              ?.productEntities ?? {};
-          if (Object.keys(entities).length > 0) {
-            clearInterval(check);
-            try {
-              document.body.removeChild(iframe);
-            } catch {
-              /* ignore */
-            }
-            const match = Object.values(entities).find(
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (p: any) => p.retailerProductId === job.retailerProductId
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ) as any;
-            const raw: string =
-              match?.price?.current?.amount ?? match?.price?.amount ?? "";
-            const amount = parseFloat(raw);
-            const price = isFinite(amount) && amount >= 0 ? amount : null;
-            resolve({
-              storeId: job.storeId,
-              retailerProductId: job.retailerProductId,
-              price,
-              // Treat as available whenever the product is found by retailerProductId —
-              // consistent with how bulk products are handled (price presence = available).
-              // ICA's `available` field is often absent or unreliable in search state.
-              available: match != null && price !== null,
-            });
-          }
-        } catch {
-          /* iframe not loaded yet — wait for next poll */
-        }
-      }, 200);
-
-      setTimeout(() => {
-        clearInterval(check);
-        try {
-          document.body.removeChild(iframe);
-        } catch {
-          /* ignore */
-        }
-        resolve({
-          storeId: job.storeId,
-          retailerProductId: job.retailerProductId,
-          price: null,
-          available: false,
-        });
-      }, 15000);
-    });
-  }
-
-  // Interleave jobs by store: [s1i1, s2i1, …, s64i1, s1i2, s2i2, …]
-  // Combined with the flat worker pool this ensures:
-  //   • At most MAX_CONCURRENT iframes at any given time
-  //   • Each store gets at most 1 active iframe at a time (no per-store rate limiting)
-  const MAX_CONCURRENT = 50;
-  const byStore = new Map<string, typeof jobs>();
-  for (const job of jobs) {
-    if (!byStore.has(job.storeId)) byStore.set(job.storeId, []);
-    byStore.get(job.storeId)!.push(job);
-  }
-  const storeQueues = [...byStore.values()];
-  const maxLen = Math.max(...storeQueues.map((q) => q.length));
-  const interleaved: typeof jobs = [];
-  for (let i = 0; i < maxLen; i++) {
-    for (const q of storeQueues) {
-      if (i < q.length) interleaved.push(q[i]);
-    }
-  }
-
-  // Flat worker pool — JavaScript is single-threaded so nextIndex++ is race-free.
   const results: Array<{
     storeId: string;
     retailerProductId: string;
     price: number | null;
     available: boolean;
-  }> = new Array(interleaved.length);
+  }> = jobs.map((j) => ({
+    storeId: j.storeId,
+    retailerProductId: j.retailerProductId,
+    price: null,
+    available: false,
+  }));
+
   let nextIndex = 0;
 
   async function worker() {
     while (true) {
       const i = nextIndex++;
-      if (i >= interleaved.length) break;
-      results[i] = await lookupOne(interleaved[i]);
+      if (i >= jobs.length) break;
+      const job = jobs[i];
+      try {
+        // Use first word of product name as search term (brand) — short query
+        // returns results faster and reliably includes the product.
+        const q = encodeURIComponent(job.productName.split(" ")[0] ?? job.productName);
+        const url =
+          `/stores/${job.storeId}/api/webproductpagews/v6/product-pages/search` +
+          `?q=${q}&maxPageSize=30&maxProductsToDecorate=30&tag=web`;
+        const resp = await fetch(url, { credentials: "include" });
+        if (!resp.ok) continue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data: any = await resp.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const products: any[] = (data.productGroups ?? []).flatMap(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (g: any) => g.decoratedProducts ?? g.products ?? []
+        );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const match: any = products.find(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (p: any) => p.retailerProductId === job.retailerProductId
+        );
+        if (!match) continue;
+
+        // Base single-unit price
+        const raw: string = match.price?.amount ?? "";
+        const singleUnitAmount = parseFloat(raw);
+        let price: number | null =
+          isFinite(singleUnitAmount) && singleUnitAmount >= 0 ? singleUnitAmount : null;
+
+        // Check promotions for stammis / multi-buy deals ("2 för 135 kr" etc.).
+        // Apply the deal price only when the cart quantity meets the threshold.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const promo of (match.promotions ?? []) as any[]) {
+          const requiredQty: number = promo.requiredProductQuantity ?? 0;
+          if (requiredQty > 0 && job.quantity >= requiredQty) {
+            // Match "N för X kr" or "N för X,XX kr" (Swedish decimal comma)
+            const m = (promo.description ?? "").match(
+              /\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i
+            );
+            if (m) {
+              const totalForGroup = parseFloat(m[1].replace(",", "."));
+              if (isFinite(totalForGroup) && totalForGroup > 0) {
+                const dealPerUnit = totalForGroup / requiredQty;
+                if (price === null || dealPerUnit < price) price = dealPerUnit;
+              }
+            }
+          }
+        }
+
+        results[i] = {
+          storeId: job.storeId,
+          retailerProductId: job.retailerProductId,
+          price,
+          available: match.available === true && price !== null,
+        };
+      } catch {
+        /* leave as { price: null, available: false } */
+      }
     }
   }
 
   await Promise.all(
-    Array.from({ length: Math.min(MAX_CONCURRENT, interleaved.length) }, worker)
+    Array.from({ length: Math.min(MAX_CONCURRENT, jobs.length) }, worker)
   );
   return results;
 }
@@ -378,57 +353,81 @@ async function runComparison(
     throw new Error("NO_STORE_DATA");
   }
 
-  // Collect iframe jobs: items missing from bulk catalog per store
-  type IframeJob = { storeId: string; productName: string; retailerProductId: string };
+  // Collect iframe jobs:
+  //   1. Items NOT found in the store's bulk catalog (availability unknown)
+  //   2. Items WITH a member/ICA-card discount in the home store — the bulk catalog
+  //      only reflects campaign prices; the SPA search (price.current.amount) also
+  //      includes personalized discounts for the logged-in user.
+  // Deduplicate per (storeId, retailerProductId) to avoid double lookups.
+  type IframeJob = { storeId: string; productName: string; retailerProductId: string; quantity: number };
   const iframeJobs: IframeJob[] = [];
+  const addedIframeKeys = new Set<string>();
   for (const { store, products } of storeBulkData) {
     const bulkRids = new Set(
       products.map((p) => p.retailerProductId).filter((id): id is string => !!id)
     );
     for (const item of productMatches) {
-      if (item.retailerProductId && !bulkRids.has(item.retailerProductId)) {
-        iframeJobs.push({
-          storeId: store.accountId,
-          productName: item.name,
-          retailerProductId: item.retailerProductId,
-        });
+      if (!item.retailerProductId) continue;
+      const notInBulk = !bulkRids.has(item.retailerProductId);
+      const needsMemberPrice = item.hasMemberDiscount === true;
+      if (notInBulk || needsMemberPrice) {
+        const key = `${store.accountId}:${item.retailerProductId}`;
+        if (!addedIframeKeys.has(key)) {
+          addedIframeKeys.add(key);
+          iframeJobs.push({
+            storeId: store.accountId,
+            productName: item.name,
+            retailerProductId: item.retailerProductId,
+            quantity: item.quantity,
+          });
+        }
       }
     }
   }
 
-  // Iframe-fallback: run all lookups in parallel via MAIN world injection
+  // Iframe lookups: run in batches so the popup can show live progress.
+  //
+  // Strategy:
+  //   1. Pre-interleave ALL jobs globally: [s1i1, s2i1, …, sNi1, s1i2, …]
+  //      This guarantees each store gets at most 1 active iframe at a time,
+  //      even when batches are processed sequentially.
+  //   2. Slice into batches of ≈ one "round" (one job per store).
+  //      After each batch we update the progress counter in session storage
+  //      so the popup re-renders with the current count.
   type IframeResult = { storeId: string; retailerProductId: string; price: number | null; available: boolean };
   const iframeByStore = new Map<string, Map<string, { price: number | null; available: boolean }>>();
 
   if (iframeJobs.length > 0 && icaTabId !== null) {
+    // The search-API lookup handles its own concurrency (30 parallel fetch calls).
+    // One executeScript call is enough — no external batching needed.
     await persistComparisonProgress({
       status: "running",
       step: "iframe_fallback",
       current: 0,
       total: iframeJobs.length,
-      detail: `Söker ${iframeJobs.length} saknade varor via söksidan…`,
+      detail: `Söker kampanjpriser för ${iframeJobs.length} varor/butiker…`,
     });
-    {
-      try {
-        const injected = await chrome.scripting.executeScript({
-          target: { tabId: icaTabId },
-          world: "MAIN",
-          func: iframeLookupInMainWorld,
-          args: [iframeJobs],
-        });
-        const results: IframeResult[] = injected[0]?.result ?? [];
-        for (const r of results) {
-          if (!iframeByStore.has(r.storeId)) {
-            iframeByStore.set(r.storeId, new Map());
-          }
-          iframeByStore
-            .get(r.storeId)!
-            .set(r.retailerProductId, { price: r.price, available: r.available });
-        }
-      } catch {
-        // Iframe fallback failed — continue with bulk results only
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId: icaTabId },
+        world: "MAIN",
+        func: iframeLookupInMainWorld,
+        args: [iframeJobs],
+      });
+      for (const r of (injected[0]?.result ?? []) as IframeResult[]) {
+        if (!iframeByStore.has(r.storeId)) iframeByStore.set(r.storeId, new Map());
+        iframeByStore.get(r.storeId)!.set(r.retailerProductId, { price: r.price, available: r.available });
       }
+    } catch {
+      /* search step failed — continue with bulk-only results */
     }
+    await persistComparisonProgress({
+      status: "running",
+      step: "iframe_fallback",
+      current: iframeJobs.length,
+      total: iframeJobs.length,
+      detail: `Söker kampanjpriser för ${iframeJobs.length} varor/butiker…`,
+    });
   }
 
   // Build final store prices (bulk + iframe merged via buildStorePrice)
