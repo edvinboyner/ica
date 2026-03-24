@@ -168,11 +168,20 @@ async function iframeLookupInMainWorld(
         );
         if (!match) continue;
 
-        // Base single-unit price
-        const raw: string = match.price?.amount ?? "";
-        const singleUnitAmount = parseFloat(raw);
+        // Take the lower of price.amount (regular shelf) and price.current.amount
+        // (active campaign price), if both are present in the v6 response.
+        // price.current.amount captures single-item stammispriser ("20 kr/st") for
+        // products not in the bulk catalogue — where Math.min(catalog, fetch)
+        // cannot help since catalogPrice would be null.
+        const regularRaw: string = match.price?.amount ?? "";
+        const currentRaw: string = match.price?.current?.amount ?? "";
+        const regularAmount = parseFloat(regularRaw);
+        const currentAmount = parseFloat(currentRaw);
         let price: number | null =
-          isFinite(singleUnitAmount) && singleUnitAmount >= 0 ? singleUnitAmount : null;
+          isFinite(regularAmount) && regularAmount >= 0 ? regularAmount : null;
+        if (isFinite(currentAmount) && currentAmount >= 0) {
+          price = price !== null ? Math.min(price, currentAmount) : currentAmount;
+        }
 
         // Check promotions for stammis / multi-buy deals ("2 för 135 kr" etc.).
         // Apply the deal price only when the cart quantity meets the threshold.
