@@ -216,6 +216,107 @@ async function findIcaTabId(): Promise<number | null> {
   }
 }
 
+// ─── Fast cart rebuild (injected into MAIN world) ─────────────────────────────
+
+/**
+ * Self-contained — injected via chrome.scripting.executeScript world:"MAIN".
+ * Calls ICA's apply-quantity API directly instead of simulating DOM clicks.
+ * All items are sent in a single POST → rebuild completes in ~1 second.
+ *
+ * Auth: CSRF token + session cookies available in MAIN world (same-origin).
+ * After success, navigates the tab to the target store so the user sees
+ * their new cart immediately.
+ */
+async function applyCartInMainWorld(
+  items: Array<{ productId: string; quantity: number; name: string }>,
+  storeId: string,
+  storeName: string
+): Promise<void> {
+  function showOverlay(msg: string) {
+    let el = document.getElementById("ica-rebuild-overlay");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "ica-rebuild-overlay";
+      el.style.cssText = [
+        "position:fixed", "top:16px", "right:16px", "z-index:99999",
+        "background:#1a5c2e", "color:#fff", "padding:12px 16px",
+        "border-radius:8px", "font:14px/1.4 system-ui,sans-serif",
+        "box-shadow:0 4px 12px rgba(0,0,0,.25)", "max-width:320px",
+        "white-space:pre-line",
+      ].join(";");
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+  }
+
+  function removeOverlay() {
+    document.getElementById("ica-rebuild-overlay")?.remove();
+  }
+
+  function post(msg: object) {
+    window.postMessage({ __icaExt: true, ...msg }, "*");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const state = (window as any).__INITIAL_STATE__;
+  const csrf: string = state?.session?.csrf?.token ?? "";
+  const version: string = state?.session?.metadata?.assetVersion ?? "";
+
+  post({ type: "REBUILD_STARTED", total: items.length, storeName });
+  showOverlay(`Bygger varukorg hos ${storeName}…`);
+
+  if (!csrf) {
+    post({
+      type: "REBUILD_COMPLETE",
+      added: 0,
+      failed: items.length,
+      failedItems: items.map((i) => i.name),
+    });
+    showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
+    setTimeout(removeOverlay, 6000);
+    return;
+  }
+
+  try {
+    const resp = await fetch(
+      `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "ecom-request-source": "web",
+          ...(version ? { "ecom-request-source-version": version } : {}),
+        },
+        body: JSON.stringify(
+          items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
+        ),
+      }
+    );
+
+    if (resp.ok) {
+      post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
+      showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
+      setTimeout(removeOverlay, 3000);
+      // Navigate tab to target store so the user sees their new cart
+      setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
+    } else {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : "okänt fel";
+    post({
+      type: "REBUILD_COMPLETE",
+      added: 0,
+      failed: items.length,
+      failedItems: items.map((i) => i.name),
+    });
+    showOverlay(`Fel vid återskapning:\n${errMsg}`);
+    setTimeout(removeOverlay, 8000);
+  }
+}
+
 /**
  * Self-contained: reads name + retailerProductId for given productIds from the
  * ICA tab's Redux productEntities. ICA's SPA loads ALL basket items' product
@@ -582,17 +683,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
-    if (message.type === "GET_REBUILD_CART") {
-      const result = await chrome.storage.local.get(["ica_rebuild_cart"]);
-      const raw = result.ica_rebuild_cart;
-      const data =
-        typeof raw === "string" && raw.length > 0 ? JSON.parse(raw) : null;
-      // Clear after reading so it's only used once
-      chrome.storage.local.remove(["ica_rebuild_cart"]);
-      sendResponse(data);
-      return;
-    }
-
     if (message.type === "SAVE_ZIP") {
       await saveState({ zipCode: message.zipCode });
       sendResponse({ ok: true });
@@ -601,49 +691,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === "OPEN_CHEAPEST_CART") {
       const { items, targetStoreId, targetStoreName } = message as {
-        items: unknown;
+        items: Array<{ productId: string; quantity: number; name: string }>;
         targetStoreId: string;
         targetStoreName?: string;
       };
-      await new Promise<void>((resolve) =>
-        chrome.storage.local.set(
-          { ica_rebuild_cart: JSON.stringify({ items, targetStoreId }) },
-          resolve
-        )
-      );
-      const tab = await chrome.tabs.create({
-        url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
-      });
+      const storeName =
+        typeof targetStoreName === "string" && targetStoreName.length > 0
+          ? targetStoreName
+          : "Butik";
 
-      const rebuildItems = items;
-      const rebuildStoreId = targetStoreId;
-
-      const listener = (changedTabId: number, info: { status?: string }) => {
-        if (changedTabId !== tab.id || info.status !== "complete") return;
-        chrome.tabs.onUpdated.removeListener(listener);
-        chrome.storage.local.remove(["ica_rebuild_cart"]);
-
-        // First inject the rebuildCart module, then call rebuildCart()
-        const storeLabel =
-          typeof targetStoreName === "string" && targetStoreName.length > 0
-            ? targetStoreName
-            : "Butik";
+      const existingTabId = await findIcaTabId();
+      if (existingTabId !== null) {
+        // Reuse the open ICA tab — fastest path, no navigation needed before inject
         chrome.scripting.executeScript({
-          target: { tabId: tab.id! },
+          target: { tabId: existingTabId },
           world: "MAIN",
-          files: ["content/rebuildCart.js"],
-        }).then(() =>
+          func: applyCartInMainWorld,
+          args: [items, targetStoreId, storeName],
+        }).catch((e) => console.error("applyCartInMainWorld failed", e));
+      } else {
+        // No ICA tab open — create one at the target store and inject after load
+        const tab = await chrome.tabs.create({
+          url: `https://handlaprivatkund.ica.se/stores/${targetStoreId}`,
+        });
+        const listener = (changedTabId: number, info: { status?: string }) => {
+          if (changedTabId !== tab.id || info.status !== "complete") return;
+          chrome.tabs.onUpdated.removeListener(listener);
           chrome.scripting.executeScript({
             target: { tabId: tab.id! },
             world: "MAIN",
-            func: (items: unknown, storeId: string, name: string) => {
-              (window as any).__icaRebuildCart(items, storeId, name);
-            },
-            args: [rebuildItems, rebuildStoreId, storeLabel],
-          })
-        ).catch((e) => console.error("inject failed", e));
-      };
-      chrome.tabs.onUpdated.addListener(listener);
+            func: applyCartInMainWorld,
+            args: [items, targetStoreId, storeName],
+          }).catch((e) => console.error("applyCartInMainWorld failed", e));
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      }
 
       sendResponse({ ok: true });
       return;
