@@ -404,15 +404,22 @@ async function applyCartInMainWorld(
  *      (e.g. newly added items, non-standard catalog products).
  *   3. Fallback: returns null for both fields (will show as unavailable).
  */
-function readProductEntitiesInMainWorld(
-  productIds: string[]
-): Array<{ productId: string; retailerProductId: string | null; name: string | null }> {
+async function readProductEntitiesInMainWorld(
+  productIds: string[],
+  storeIdForSearch: string
+): Promise<Array<{ productId: string; retailerProductId: string | null; name: string | null }>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const state = (window as any).__INITIAL_STATE__;
 
-  // Path 1: productEntities (keyed by productId)
+  // Path 1: productEntities (keyed by productId) — try several known Redux shapes
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const entities: Record<string, any> = state?.data?.products?.productEntities ?? {};
+  const entities: Record<string, any> = Object.assign(
+    {},
+    state?.data?.products?.productEntities,
+    state?.data?.products?.entities,
+    state?.data?.productEntities,
+    state?.productEntities
+  );
 
   // Path 2: basket items — try several known Redux state shapes
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -430,24 +437,60 @@ function readProductEntitiesInMainWorld(
     if (pid) basketMap.set(pid, bi);
   }
 
-  return productIds.map((id) => {
+  const results = productIds.map((id) => {
     const entity = entities[id];
     const bi = basketMap.get(id);
+    // Try several nested sub-objects basket items can use for product details
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nested: any = bi?.product ?? bi?.productDetails ?? bi?.catalogItem ?? null;
     const retailerProductId =
       entity?.retailerProductId ??
       bi?.retailerProductId ??
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (bi?.product as any)?.retailerProductId ??
+      nested?.retailerProductId ??
       null;
     const name =
       entity?.name ??
       bi?.name ??
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (bi?.product as any)?.name ??
+      nested?.name ??
       bi?.title ??
       null;
     return { productId: id, retailerProductId, name };
   });
+
+  // Fallback: for items still without retailerProductId, search the current
+  // store's v6 API using the productId as query. UUID-format productIds may not
+  // be indexed, but article-number-format IDs sometimes are. Safe to try.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unresolved = results.filter((r: any) => !r.retailerProductId);
+  if (unresolved.length > 0 && storeIdForSearch) {
+    await Promise.all(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      unresolved.map(async (r: any) => {
+        try {
+          const url =
+            `/stores/${storeIdForSearch}/api/webproductpagews/v6/product-pages/search` +
+            `?q=${encodeURIComponent(r.productId)}&maxPageSize=5&tag=web`;
+          const resp = await fetch(url, { credentials: "include" });
+          if (!resp.ok) return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const data: any = await resp.json();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const products: any[] = (data.productGroups ?? []).flatMap(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (g: any) => g.decoratedProducts ?? g.products ?? []
+          );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const match = products.find((p: any) => p.productId === r.productId);
+          if (match) {
+            r.retailerProductId = match.retailerProductId ?? null;
+            if (!r.name) r.name = match.name ?? null;
+          }
+        } catch { /* ignore */ }
+      })
+    );
+  }
+
+  return results;
 }
 
 // ─── Comparison logic ────────────────────────────────────────────────────────
@@ -485,7 +528,7 @@ async function runComparison(
           target: { tabId: icaTabId },
           world: "MAIN",
           func: readProductEntitiesInMainWorld,
-          args: [unenrichedIds],
+          args: [unenrichedIds, storeId],
         });
         type EntityEntry = { productId: string; retailerProductId: string | null; name: string | null };
         for (const e of (injected[0]?.result ?? []) as EntityEntry[]) {

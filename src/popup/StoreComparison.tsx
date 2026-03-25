@@ -110,12 +110,10 @@ export default function StoreComparison({
   const liveStore = liveStoreId ? stores.find((s) => s.storeId === liveStoreId) : undefined;
   const displayCurrentStore = liveStore ?? stores.find((s) => s.storeId === currentStoreId);
 
-  // The cheapest store is always the overall minimum — independent of which
-  // store is "current".
-  const cheapestStore = stores.reduce<typeof stores[number] | undefined>(
-    (best, s) => (!best || s.totalPrice < best.totalPrice ? s : best),
-    undefined
-  );
+  // Use cheapestStoreId from the comparison result — it was computed using only
+  // stores that carry ALL comparable items (so a store missing items can't "win"
+  // by having a lower total due to missing prices).
+  const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
 
   // Savings relative to where the user is now (0 if they're already at cheapest).
   const displaySaving =
@@ -285,6 +283,15 @@ function StoreRow({
       })
     : [];
 
+  // Items without retailerProductId can't be cross-store matched — group them
+  // into a single summary line instead of repeating "Okänd vara" for every store.
+  const knownMissing = missingItems.filter((item) => !!item.retailerProductId);
+  const unknownMissing = missingItems.filter((item) => !item.retailerProductId);
+  const unknownPrice = unknownMissing.reduce(
+    (sum, item) => sum + (item.currentPrice ?? 0) * item.quantity,
+    0
+  );
+
   return (
     <div
       className={`rounded-lg border px-3 py-2 ${
@@ -320,7 +327,7 @@ function StoreRow({
             </div>
             {missingItems.length > 0 && (
               <div className="mt-0.5 space-y-0.5">
-                {missingItems.map((item) => (
+                {knownMissing.map((item) => (
                   <p key={item.productId} className="text-[10px] text-amber-600 leading-tight">
                     Saknas: {item.name}
                     {item.currentPrice !== null
@@ -328,6 +335,12 @@ function StoreRow({
                       : ""}
                   </p>
                 ))}
+                {unknownMissing.length > 0 && (
+                  <p className="text-[10px] text-gray-400 leading-tight">
+                    {unknownMissing.length} vara{unknownMissing.length > 1 ? "r" : ""} kan inte jämföras
+                    {unknownPrice > 0 ? ` (${formatPrice(unknownPrice)} kr i din butik)` : ""}
+                  </p>
+                )}
               </div>
             )}
           </div>

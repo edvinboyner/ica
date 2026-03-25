@@ -145,10 +145,13 @@ export function buildComparisonResult(
   stores: StorePrice[],
   currentStoreId: string
 ): ComparisonResult {
-  // Only consider stores where all cart items are available for "cheapest"
-  const fullStores = stores.filter(
-    (s) => s.availableCount === cartItems.length
-  );
+  // Only consider stores that carry every item we *can* compare.
+  // Items without retailerProductId (unresolvable) are never "available" in any
+  // store — counting them would make fullStores permanently empty, so we compare
+  // only on the resolvable subset.
+  const resolvableCount = cartItems.filter((i) => !!i.retailerProductId).length;
+  const threshold = resolvableCount > 0 ? resolvableCount : cartItems.length;
+  const fullStores = stores.filter((s) => s.availableCount >= threshold);
 
   const ranked = [...fullStores].sort((a, b) => a.totalPrice - b.totalPrice);
   const cheapestStoreId = ranked[0]?.storeId ?? currentStoreId;
