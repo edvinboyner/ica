@@ -292,6 +292,16 @@ function ComparisonLoadingPanel({
 }: {
   progress: ComparisonProgressState | null;
 }) {
+  // Track when the store_catalogues phase starts so we can estimate remaining time.
+  const [catalogPhaseStart, setCatalogPhaseStart] = useState<number | null>(null);
+  useEffect(() => {
+    if (progress?.step === "store_catalogues") {
+      setCatalogPhaseStart((prev) => (prev !== null ? prev : Date.now()));
+    } else {
+      setCatalogPhaseStart(null);
+    }
+  }, [progress?.step]);
+
   const pct = computeUnifiedPercent(progress);
   const label = progress?.detail ?? "Startar jämförelse…";
 
@@ -319,10 +329,28 @@ function ComparisonLoadingPanel({
     ? `width ${iframeDone ? "0.4s ease-out" : `${estimatedSec}s linear`}`
     : "width 0.5s ease-out";
 
-  // Left label: show estimated seconds remaining during active iframe phase.
-  const leftLabel = isIframePhase && !iframeDone && iframeJobs > 0
-    ? `~${Math.round(estimatedSec)}s`
-    : `${pct}%`;
+  // Left label: always show time estimate; fall back to % for cart/stores_list
+  // (those phases are very fast so an exact number isn't useful).
+  let leftLabel: string;
+  if (isIframePhase && !iframeDone && iframeJobs > 0) {
+    leftLabel = `~${Math.round(estimatedSec)}s`;
+  } else if (
+    progress?.step === "store_catalogues" &&
+    progress.total > 0
+  ) {
+    // Use actual elapsed time to compute a per-store average, then extrapolate.
+    if (catalogPhaseStart !== null && progress.current > 1) {
+      const elapsed = (Date.now() - catalogPhaseStart) / 1000;
+      const perStore = elapsed / progress.current;
+      const remaining = Math.round((progress.total - progress.current) * perStore);
+      leftLabel = `~${Math.max(1, remaining)}s`;
+    } else {
+      // Not enough data yet — rough estimate: 10 stores/s with parallelism.
+      leftLabel = `~${Math.max(2, Math.ceil(progress.total / 10))}s`;
+    }
+  } else {
+    leftLabel = `${pct}%`;
+  }
 
   return (
     <div className="py-6 space-y-3">

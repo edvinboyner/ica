@@ -260,6 +260,13 @@ async function applyCartInMainWorld(
   storeId: string,
   storeName: string
 ): Promise<void> {
+  // Prevent concurrent runs — the service worker fires executeScript without
+  // awaiting it, so rapid button clicks launch two async executions in the same
+  // MAIN world context. Both would see an empty (or identical) cart, skip
+  // clearing, and each add all items → quantities doubled.
+  if ((window as any).__icaCartRebuildActive) return;
+  (window as any).__icaCartRebuildActive = true;
+
   function showOverlay(msg: string) {
     let el = document.getElementById("ica-rebuild-overlay");
     if (!el) {
@@ -293,6 +300,8 @@ async function applyCartInMainWorld(
   post({ type: "REBUILD_STARTED", total: items.length, storeName });
   showOverlay(`Bygger varukorg hos ${storeName}…`);
 
+  try {
+
   // Step 0: Clear ALL existing cart items before adding new ones.
   // The apply-quantity API is additive (not absolute), so we must zero out
   // everything first — otherwise clicking the button multiple times stacks
@@ -300,7 +309,7 @@ async function applyCartInMainWorld(
   try {
     const existingCartResp = await fetch(
       `/stores/${storeId}/api/cart/v1/carts/active`,
-      { credentials: "include" }
+      { credentials: "include", headers: { Accept: "application/json" } }
     );
     if (existingCartResp.ok) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -375,6 +384,11 @@ async function applyCartInMainWorld(
     });
     showOverlay(`Fel vid återskapning:\n${errMsg}`);
     setTimeout(removeOverlay, 8000);
+  }
+
+  } finally {
+    // Always release the lock so subsequent opens work correctly
+    (window as any).__icaCartRebuildActive = false;
   }
 }
 
@@ -539,7 +553,7 @@ async function runComparison(
         step: "store_catalogues",
         current: bulkCompleted,
         total: n,
-        detail: store.name,
+        detail: "Hämtar priser…",
       });
       return { store, products };
     })
