@@ -3,7 +3,7 @@
   "name": "ICA Price Comparator",
   "version": "1.0.0",
   "description": "Jämför priser mellan ICA-butiker med hemleverans",
-  "permissions": ["storage", "cookies", "tabs", "scripting"],
+  "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
     "https://handlaprivatkund.ica.se/*",
     "https://handla.ica.se/*"

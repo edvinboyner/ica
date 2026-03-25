@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Integritetspolicy – ICA Prisjämförelse</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 680px;
+      margin: 48px auto;
+      padding: 0 24px;
+      line-height: 1.7;
+      color: #1a1a1a;
+    }
+    h1 { color: #e3000b; }
+    h2 { margin-top: 2em; }
+    p, li { color: #333; }
+  </style>
+</head>
+<body>
+  <h1>Integritetspolicy – ICA Prisjämförelse</h1>
+  <p><em>Senast uppdaterad: mars 2026</em></p>
+
+  <h2>Vad extensionen gör</h2>
+  <p>
+    ICA Prisjämförelse är ett Chrome-tillägg som hjälper dig att jämföra
+    priser på din varukorg mellan ICA-butiker med hemleverans i ditt
+    postnummerområde.
+  </p>
+
+  <h2>Vilken data samlas in?</h2>
+  <p>Extensionen sparar följande data <strong>lokalt i din webbläsare</strong>:</p>
+  <ul>
+    <li>Ditt postnummer (för att söka efter butiker med hemleverans)</li>
+    <li>Din nuvarande ICA-butiks ID (läses från ICA:s webbsida)</li>
+  </ul>
+  <p>
+    Ingen data skickas till externa servrar. All bearbetning sker
+    direkt i din webbläsare. Ingen tredjepart har tillgång till dina uppgifter.
+  </p>
+
+  <h2>Vilken data delas inte?</h2>
+  <ul>
+    <li>Din varukorg eller dina köpvanor delas inte med någon</li>
+    <li>Din inloggningsinformation hos ICA lagras inte av extensionen</li>
+    <li>Inga analytics, spårningscookies eller reklamtjänster används</li>
+  </ul>
+
+  <h2>Hur används din ICA-session?</h2>
+  <p>
+    Extensionen använder din befintliga inloggade session på
+    handlaprivatkund.ica.se för att hämta din varukorg och prisinformation
+    från ICAs egna API:er — på samma sätt som ICA:s webbsida själv gör.
+    Dina inloggningsuppgifter läses eller lagras aldrig av extensionen.
+  </p>
+
+  <h2>Behörigheter</h2>
+  <ul>
+    <li><strong>storage</strong> – Sparar ditt postnummer och butiks-ID lokalt</li>
+    <li><strong>tabs</strong> – Hittar din öppna ICA-flik för att köra jämförelsen</li>
+    <li><strong>scripting</strong> – Kör prisjämförelsen i din ICA-flik (same-origin)</li>
+    <li><strong>handlaprivatkund.ica.se, handla.ica.se</strong> – Hämtar prisdata från ICA</li>
+  </ul>
+
+  <h2>Ta bort data</h2>
+  <p>
+    Du kan när som helst radera all sparad data genom att avinstallera
+    extensionen. Chrome rensar då all lokal data automatiskt.
+  </p>
+
+  <h2>Kontakt</h2>
+  <p>
+    Frågor om integritetspolicyn kan skickas via GitHub-repositoryt för
+    extensionen.
+  </p>
+</body>
+</html>
