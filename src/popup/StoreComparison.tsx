@@ -93,22 +93,42 @@ export default function StoreComparison({
   cartStale,
   comparisonUpdatedAt,
   onRefreshComparison,
+  liveStoreId,
 }: {
   result: ComparisonResult;
   rebuildState: RebuildSessionState | null;
   cartStale: boolean;
   comparisonUpdatedAt: number | null;
   onRefreshComparison: () => void;
+  liveStoreId: string | null;
 }) {
   const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent, actualCartTotal } =
     result;
 
+  // Use the user's live store (if it's in the results) as the "current" store
+  // so the savings banner always reflects where they are right now.
+  const liveStore = liveStoreId ? stores.find((s) => s.storeId === liveStoreId) : undefined;
+  const displayCurrentStore = liveStore ?? stores.find((s) => s.storeId === currentStoreId);
+
+  // The cheapest store is always the overall minimum — independent of which
+  // store is "current".
+  const cheapestStore = stores.reduce<typeof stores[number] | undefined>(
+    (best, s) => (!best || s.totalPrice < best.totalPrice ? s : best),
+    undefined
+  );
+
+  // Savings relative to where the user is now (0 if they're already at cheapest).
+  const displaySaving =
+    displayCurrentStore && cheapestStore && cheapestStore.storeId !== displayCurrentStore.storeId
+      ? Math.max(0, displayCurrentStore.totalPrice - cheapestStore.totalPrice)
+      : 0;
+
+  // hasHiddenDeals is still based on the original home store (actualCartTotal
+  // comes from the home-store cart API and is fixed at comparison time).
   const currentStore = stores.find((s) => s.storeId === currentStoreId);
   const hasHiddenDeals =
     currentStore !== undefined &&
     actualCartTotal < currentStore.totalPrice - 0.01;
-
-  const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
 
   function openCart(store: StorePrice) {
     const items: RebuildItem[] = cartItems.map((i) => ({
@@ -166,19 +186,19 @@ export default function StoreComparison({
         </div>
       )}
 
-      {/* Summary banner */}
-      {savingVsCurrent > 0 && cheapestStore ? (
+      {/* Summary banner — always based on the user's current live store */}
+      {displaySaving > 0 && cheapestStore ? (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-3">
           <div className="flex items-baseline gap-1.5">
             <span className="text-2xl font-bold text-green-700">
-              {formatPrice(savingVsCurrent)} kr
+              {formatPrice(displaySaving)} kr
             </span>
             <span className="text-sm text-green-600">att spara</span>
           </div>
           <p className="text-xs text-green-700">
             Handla hos{" "}
             <span className="font-semibold">{cheapestStore.storeName}</span>{" "}
-            istället för {currentStore?.storeName ?? "nuvarande butik"}
+            istället för {displayCurrentStore?.storeName ?? "nuvarande butik"}
           </p>
           <button
             onClick={() => openCart(cheapestStore)}

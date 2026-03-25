@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import StoreComparison from "./StoreComparison";
 import type {
   ComparisonResult,
@@ -244,6 +244,7 @@ export default function Popup() {
             cartStale={cartStale}
             comparisonUpdatedAt={comparisonUpdatedAt}
             onRefreshComparison={runComparison}
+            liveStoreId={storeId}
           />
         )}
 
@@ -292,62 +293,68 @@ function ComparisonLoadingPanel({
 }: {
   progress: ComparisonProgressState | null;
 }) {
-  // Track when the store_catalogues phase starts so we can estimate remaining time.
-  const [catalogPhaseStart, setCatalogPhaseStart] = useState<number | null>(null);
+  // Live clock — ticks every 500 ms so the countdown updates in real time.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (progress?.step === "store_catalogues") {
-      setCatalogPhaseStart((prev) => (prev !== null ? prev : Date.now()));
-    } else {
-      setCatalogPhaseStart(null);
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  // Ref so we can read the start time without adding it to effect deps.
+  const runStartRef = useRef<number | null>(null);
+  const [totalEstimate, setTotalEstimate] = useState<number>(0);
+  const [iframeEstimate, setIframeEstimate] = useState<number>(3);
+
+  const step = progress?.step;
+  const total = progress?.total ?? 0;
+
+  useEffect(() => {
+    if (!step) {
+      // Comparison finished or not started — reset.
+      runStartRef.current = null;
+      setTotalEstimate(0);
+      return;
     }
-  }, [progress?.step]);
+    if (runStartRef.current === null) {
+      // First step seen — start the clock immediately with a rough initial
+      // estimate (15 s covers most carts; will be refined below).
+      runStartRef.current = Date.now();
+      setTotalEstimate(15);
+    }
+    if (step === "store_catalogues") {
+      // Refine: now we know the store count.
+      const elapsed = (Date.now() - runStartRef.current!) / 1000;
+      const catalogEst = Math.max(3, Math.ceil(total / 10));
+      setTotalEstimate(elapsed + catalogEst + 5); // +5 s iframe placeholder
+    } else if (step === "iframe_fallback") {
+      // Final refinement: actual iframe job count known.
+      const elapsed = (Date.now() - runStartRef.current!) / 1000;
+      const ifrEst = Math.max(3, Math.ceil(total / 30) * 0.85);
+      setIframeEstimate(ifrEst);
+      setTotalEstimate(elapsed + ifrEst);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, total]);
 
   const pct = computeUnifiedPercent(progress);
   const label = progress?.detail ?? "Startar jämförelse…";
 
-  // During the iframe_fallback phase the service worker only writes two
-  // progress updates: one at start (current=0) and one at end (current=total).
-  // Without special handling the bar would sit frozen at 82 % for 10–15 s.
-  //
-  // Fix: when the phase starts we know total jobs → estimate duration →
-  // set a CSS transition that animates the bar linearly from 82 → 98 % over
-  // the estimated time.  If the phase finishes early, snap to 98 % fast.
-  //
-  // Estimate: ≈ 30 concurrent workers, ~0.85 s per round-trip → ceil(jobs/30)*0.85 s.
-  const isIframePhase = progress?.step === "iframe_fallback";
-  const iframeJobs = isIframePhase ? (progress?.total ?? 0) : 0;
-  const iframeDone =
-    isIframePhase && iframeJobs > 0 && progress?.current === progress?.total;
-  const estimatedSec = iframeJobs > 0
-    ? Math.max(3, Math.ceil(iframeJobs / 30) * 0.85)
-    : 3;
+  const isIframePhase = step === "iframe_fallback";
+  const iframeDone = isIframePhase && total > 0 && progress?.current === total;
 
-  // Bar target: 98 % as soon as iframe phase starts (CSS transition does the work).
-  // All other phases: use the computed step-based %.
+  // iframe_fallback bar: CSS transition animates 82 → 98 % over iframeEstimate s.
+  // store_catalogues bar: real progress updates drive it incrementally.
   const barPct = isIframePhase ? 98 : pct;
   const barTransition = isIframePhase
-    ? `width ${iframeDone ? "0.4s ease-out" : `${estimatedSec}s linear`}`
+    ? `width ${iframeDone ? "0.4s ease-out" : `${iframeEstimate}s linear`}`
     : "width 0.5s ease-out";
 
-  // Left label: always show time estimate; fall back to % for cart/stores_list
-  // (those phases are very fast so an exact number isn't useful).
+  // Single countdown from the very first step; falls back to pct% only when done.
   let leftLabel: string;
-  if (isIframePhase && !iframeDone && iframeJobs > 0) {
-    leftLabel = `~${Math.round(estimatedSec)}s`;
-  } else if (
-    progress?.step === "store_catalogues" &&
-    progress.total > 0
-  ) {
-    // Use actual elapsed time to compute a per-store average, then extrapolate.
-    if (catalogPhaseStart !== null && progress.current > 1) {
-      const elapsed = (Date.now() - catalogPhaseStart) / 1000;
-      const perStore = elapsed / progress.current;
-      const remaining = Math.round((progress.total - progress.current) * perStore);
-      leftLabel = `~${Math.max(1, remaining)}s`;
-    } else {
-      // Not enough data yet — rough estimate: 10 stores/s with parallelism.
-      leftLabel = `~${Math.max(2, Math.ceil(progress.total / 10))}s`;
-    }
+  if (runStartRef.current !== null && !iframeDone) {
+    const elapsed = (now - runStartRef.current) / 1000;
+    const remaining = Math.max(1, Math.round(totalEstimate - elapsed));
+    leftLabel = `~${remaining}s`;
   } else {
     leftLabel = `${pct}%`;
   }
