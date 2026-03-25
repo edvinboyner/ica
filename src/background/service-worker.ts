@@ -260,10 +260,7 @@ async function applyCartInMainWorld(
   storeId: string,
   storeName: string
 ): Promise<void> {
-  // Prevent concurrent runs — the service worker fires executeScript without
-  // awaiting it, so rapid button clicks launch two async executions in the same
-  // MAIN world context. Both would see an empty (or identical) cart, skip
-  // clearing, and each add all items → quantities doubled.
+  // Prevent concurrent runs (rapid double-clicks).
   if ((window as any).__icaCartRebuildActive) return;
   (window as any).__icaCartRebuildActive = true;
 
@@ -301,93 +298,97 @@ async function applyCartInMainWorld(
   showOverlay(`Bygger varukorg hos ${storeName}…`);
 
   try {
-
-  // Step 0: Clear ALL existing cart items before adding new ones.
-  // The apply-quantity API is additive (not absolute), so we must zero out
-  // everything first — otherwise clicking the button multiple times stacks
-  // quantities on top of the items already in the cart.
-  try {
-    const existingCartResp = await fetch(
-      `/stores/${storeId}/api/cart/v1/carts/active`,
-      { credentials: "include", headers: { Accept: "application/json" } }
-    );
-    if (existingCartResp.ok) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const existingCartData: any = await existingCartResp.json();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const existingItems: Array<{ productId: string }> = existingCartData.items ?? [];
-      const toRemove = existingItems.map((i) => ({ productId: i.productId, quantity: 0 }));
-      if (toRemove.length > 0) {
-        await fetch(`/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`, {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-TOKEN": csrf,
-            "ecom-request-source": "web",
-            ...(version ? { "ecom-request-source-version": version } : {}),
-          },
-          body: JSON.stringify(toRemove),
-        });
-      }
+    if (!csrf) {
+      post({ type: "REBUILD_COMPLETE", added: 0, failed: items.length, failedItems: items.map((i) => i.name) });
+      showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
+      setTimeout(removeOverlay, 6000);
+      return;
     }
-  } catch {
-    // Best-effort clear — proceed with adding new items even if clearing fails
-  }
 
-  if (!csrf) {
-    post({
-      type: "REBUILD_COMPLETE",
-      added: 0,
-      failed: items.length,
-      failedItems: items.map((i) => i.name),
-    });
-    showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
-    setTimeout(removeOverlay, 6000);
-    return;
-  }
+    const apiHeaders = {
+      "Content-Type": "application/json",
+      "X-CSRF-TOKEN": csrf,
+      "ecom-request-source": "web",
+      ...(version ? { "ecom-request-source-version": version } : {}),
+    };
 
-  try {
-    const resp = await fetch(
-      `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-TOKEN": csrf,
-          "ecom-request-source": "web",
-          ...(version ? { "ecom-request-source-version": version } : {}),
-        },
-        body: JSON.stringify(
-          items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
-        ),
+    // ── Delta-based cart update ──────────────────────────────────────────────
+    // ICA's apply-quantity is a delta/additive API: sending {quantity: N} adds N
+    // to whatever is already in the cart — it does NOT set an absolute value.
+    // Sending {quantity: 0} is therefore a no-op, not a removal.
+    //
+    // Strategy: read the current cart, compute the exact delta needed to reach
+    // the desired final state, and send a single POST:
+    //   • Items to remove     → quantity: -(currentQty)
+    //   • Items to adjust     → quantity: newQty - currentQty
+    //   • Brand-new items     → quantity: newQty   (currentQty = 0)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let payload: Array<{ productId: string; quantity: number }>;
+    try {
+      const cartResp = await fetch(
+        `/stores/${storeId}/api/cart/v1/carts/active`,
+        { credentials: "include", headers: { Accept: "application/json" } }
+      );
+      if (cartResp.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const cartData: any = await cartResp.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const existingItems: any[] = cartData.items ?? [];
+
+        // Build productId → current quantity map
+        const currentQty = new Map<string, number>();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const item of existingItems) {
+          const qty =
+            typeof item.quantity === "object"
+              ? (item.quantity.quantityInBasket ?? 1)
+              : (item.quantity ?? 1);
+          currentQty.set(item.productId, qty);
+        }
+
+        const newProductIds = new Set(items.map((i) => i.productId));
+        payload = [
+          // Remove items that are in the cart but not in the new set
+          ...Array.from(currentQty.entries())
+            .filter(([id]) => !newProductIds.has(id))
+            .map(([id, qty]) => ({ productId: id, quantity: -qty })),
+          // Add / adjust items in the new set (skip if delta is zero)
+          ...items
+            .map((i) => ({
+              productId: i.productId,
+              quantity: i.quantity - (currentQty.get(i.productId) ?? 0),
+            }))
+            .filter((i) => i.quantity !== 0),
+        ];
+      } else {
+        // Can't read the cart — assume empty and send full quantities
+        payload = items.map((i) => ({ productId: i.productId, quantity: i.quantity }));
       }
-    );
-
-    if (resp.ok) {
-      post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
-      showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
-      setTimeout(removeOverlay, 3000);
-      // Navigate tab to target store so the user sees their new cart
-      setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
-    } else {
-      throw new Error(`HTTP ${resp.status}`);
+    } catch {
+      // Network error — assume empty cart
+      payload = items.map((i) => ({ productId: i.productId, quantity: i.quantity }));
     }
+
+    if (payload.length > 0) {
+      const resp = await fetch(
+        `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
+        { method: "POST", credentials: "include", headers: apiHeaders, body: JSON.stringify(payload) }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    }
+
+    post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
+    showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
+    setTimeout(removeOverlay, 3000);
+    // Navigate tab to target store so the user sees their new cart
+    setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
+
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : "okänt fel";
-    post({
-      type: "REBUILD_COMPLETE",
-      added: 0,
-      failed: items.length,
-      failedItems: items.map((i) => i.name),
-    });
+    post({ type: "REBUILD_COMPLETE", added: 0, failed: items.length, failedItems: items.map((i) => i.name) });
     showOverlay(`Fel vid återskapning:\n${errMsg}`);
     setTimeout(removeOverlay, 8000);
-  }
-
   } finally {
-    // Always release the lock so subsequent opens work correctly
     (window as any).__icaCartRebuildActive = false;
   }
 }
