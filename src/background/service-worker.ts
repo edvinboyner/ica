@@ -293,6 +293,40 @@ async function applyCartInMainWorld(
   post({ type: "REBUILD_STARTED", total: items.length, storeName });
   showOverlay(`Bygger varukorg hos ${storeName}…`);
 
+  // Step 0: Clear existing cart items that are not part of the new cart.
+  // This prevents stale items from remaining in the target store's basket.
+  try {
+    const existingCartResp = await fetch(
+      `/stores/${storeId}/api/cart/v1/carts/active`,
+      { credentials: "include" }
+    );
+    if (existingCartResp.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const existingCartData: any = await existingCartResp.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const existingItems: Array<{ productId: string }> = existingCartData.items ?? [];
+      const newProductIds = new Set<string>(items.map((i) => i.productId));
+      const toRemove = existingItems
+        .filter((i) => !newProductIds.has(i.productId))
+        .map((i) => ({ productId: i.productId, quantity: 0 }));
+      if (toRemove.length > 0) {
+        await fetch(`/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-TOKEN": csrf,
+            "ecom-request-source": "web",
+            ...(version ? { "ecom-request-source-version": version } : {}),
+          },
+          body: JSON.stringify(toRemove),
+        });
+      }
+    }
+  } catch {
+    // Best-effort clear — proceed with adding new items even if clearing fails
+  }
+
   if (!csrf) {
     post({
       type: "REBUILD_COMPLETE",
@@ -793,6 +827,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       const existingTabId = await findIcaTabId();
       if (existingTabId !== null) {
+        // Focus the ICA tab so the user sees the cart being rebuilt
+        chrome.tabs.update(existingTabId, { active: true }).catch(() => {});
+        chrome.tabs.get(existingTabId).then((tab) => {
+          if (tab.windowId) chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        }).catch(() => {});
+
         // Reuse the open ICA tab — fastest path, no navigation needed before inject
         chrome.scripting.executeScript({
           target: { tabId: existingTabId },

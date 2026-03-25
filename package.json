@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
-    "build": "vite build"
+    "build": "vite build",
+    "export": "vite build && cd dist && zip -r ../ica-extension.zip . && cd .. && echo Exporterat till ica-extension.zip"
   },
   "keywords": [],
   "author": "",
