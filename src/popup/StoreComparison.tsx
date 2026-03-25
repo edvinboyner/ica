@@ -93,26 +93,42 @@ export default function StoreComparison({
   cartStale,
   comparisonUpdatedAt,
   onRefreshComparison,
+  liveStoreId,
 }: {
   result: ComparisonResult;
   rebuildState: RebuildSessionState | null;
   cartStale: boolean;
   comparisonUpdatedAt: number | null;
   onRefreshComparison: () => void;
+  liveStoreId: string | null;
 }) {
   const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent, actualCartTotal } =
     result;
 
-  // Show an info note when actualCartTotal < current store catalog total — meaning
-  // the user benefits from stammis / multi-buy deals that don't appear in the catalog.
+  // Use the user's live store (if it's in the results) as the "current" store
+  // so the savings banner always reflects where they are right now.
+  const liveStore = liveStoreId ? stores.find((s) => s.storeId === liveStoreId) : undefined;
+  const displayCurrentStore = liveStore ?? stores.find((s) => s.storeId === currentStoreId);
+
+  // Use cheapestStoreId from the comparison result — it was computed using only
+  // stores that carry ALL comparable items (so a store missing items can't "win"
+  // by having a lower total due to missing prices).
+  const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
+
+  // Savings relative to where the user is now (0 if they're already at cheapest).
+  const displaySaving =
+    displayCurrentStore && cheapestStore && cheapestStore.storeId !== displayCurrentStore.storeId
+      ? Math.max(0, displayCurrentStore.totalPrice - cheapestStore.totalPrice)
+      : 0;
+
+  // hasHiddenDeals is still based on the original home store (actualCartTotal
+  // comes from the home-store cart API and is fixed at comparison time).
   const currentStore = stores.find((s) => s.storeId === currentStoreId);
   const hasHiddenDeals =
     currentStore !== undefined &&
     actualCartTotal < currentStore.totalPrice - 0.01;
 
-  const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
-
-  function openCheapestCart() {
+  function openCart(store: StorePrice) {
     const items: RebuildItem[] = cartItems.map((i) => ({
       productId: i.productId,
       retailerProductId: i.retailerProductId,
@@ -123,12 +139,10 @@ export default function StoreComparison({
       {
         type: "OPEN_CHEAPEST_CART",
         items,
-        targetStoreId: cheapestStoreId,
-        targetStoreName: cheapestStore?.storeName,
+        targetStoreId: store.storeId,
+        targetStoreName: store.storeName,
       },
-      () => {
-        /* wait for ack before popup closes */
-      }
+      () => {}
     );
   }
 
@@ -170,37 +184,41 @@ export default function StoreComparison({
         </div>
       )}
 
-      {/* Summary banner */}
-      {savingVsCurrent > 0 && cheapestStore && (
-        <div className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-2">
-          <p className="text-sm font-semibold text-green-800">
-            Du kan spara{" "}
-            <span className="text-green-600">{formatPrice(savingVsCurrent)} kr</span>
-          </p>
+      {/* Summary banner — always based on the user's current live store */}
+      {displaySaving > 0 && cheapestStore ? (
+        <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-3">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-2xl font-bold text-green-700">
+              {formatPrice(displaySaving)} kr
+            </span>
+            <span className="text-sm text-green-600">att spara</span>
+          </div>
           <p className="text-xs text-green-700">
-            Handla hos {cheapestStore.storeName} istället för{" "}
-            {currentStore?.storeName ?? "nuvarande butik"}
+            Handla hos{" "}
+            <span className="font-semibold">{cheapestStore.storeName}</span>{" "}
+            istället för {displayCurrentStore?.storeName ?? "nuvarande butik"}
           </p>
           <button
-            onClick={openCheapestCart}
-            className="w-full bg-green-600 hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded transition-colors"
+            onClick={() => openCart(cheapestStore)}
+            className="w-full bg-[#1a5c2e] hover:bg-[#154d26] text-white text-sm font-semibold py-2 px-3 rounded-lg transition-colors"
           >
-            Öppna billigaste korgen →
+            Öppna billigaste varukorg →
           </button>
         </div>
-      )}
-
-      {savingVsCurrent === 0 && (
-        <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
-          <p className="text-sm text-blue-800">
+      ) : (
+        <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 space-y-1">
+          <p className="text-sm font-medium text-blue-800">
             Du handlar redan i den billigaste butiken!
+          </p>
+          <p className="text-[11px] text-blue-600">
+            Du kan ändå öppna korgen i en annan butik via listan nedan.
           </p>
         </div>
       )}
 
       {rebuildState && <RebuildProgressPanel state={rebuildState} />}
 
-      {/* Hidden-deals info: stammis / multi-buy not visible in catalogue */}
+      {/* Hidden-deals info */}
       {hasHiddenDeals && (
         <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] text-blue-800 leading-snug space-y-0.5">
           <p>
@@ -208,23 +226,26 @@ export default function StoreComparison({
             {" "}(inkl. stammispris &amp; flerkampanjer).
           </p>
           <p className="text-blue-600">
-            Jämförelsepriser nedan baseras på katalog — faktisk besparing kan vara större.
+            Jämförelsepriser baseras på katalog — faktisk besparing kan vara större.
           </p>
         </div>
       )}
 
       {/* Store list */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
           Butiker ({stores.length})
         </h2>
-        {stores.map((store) => (
+        {stores.map((store, idx) => (
           <StoreRow
             key={store.storeId}
             store={store}
+            rank={idx + 1}
             isCurrent={store.storeId === currentStoreId}
             isCheapest={store.storeId === cheapestStoreId}
             totalItems={cartItems.length}
+            cartItems={cartItems}
+            onOpenCart={openCart}
           />
         ))}
       </div>
@@ -237,57 +258,110 @@ export default function StoreComparison({
 
 function StoreRow({
   store,
+  rank,
   isCurrent,
   isCheapest,
   totalItems,
+  cartItems,
+  onOpenCart,
 }: {
   store: StorePrice;
+  rank: number;
   isCurrent: boolean;
   isCheapest: boolean;
   totalItems: number;
+  cartItems: ComparisonResult["cartItems"];
+  onOpenCart: (store: StorePrice) => void;
 }) {
   const missingCount = totalItems - store.availableCount;
 
+  // Find which specific products are missing from this store
+  const missingItems = missingCount > 0
+    ? cartItems.filter((item) => {
+        const p = store.products.find((sp) => sp.productId === item.productId);
+        return !p?.available;
+      })
+    : [];
+
+  // Items without retailerProductId can't be cross-store matched — group them
+  // into a single summary line instead of repeating "Okänd vara" for every store.
+  const knownMissing = missingItems.filter((item) => !!item.retailerProductId);
+  const unknownMissing = missingItems.filter((item) => !item.retailerProductId);
+  const unknownPrice = unknownMissing.reduce(
+    (sum, item) => sum + (item.currentPrice ?? 0) * item.quantity,
+    0
+  );
+
   return (
     <div
-      className={`rounded-lg border px-3 py-2.5 flex items-center justify-between gap-2 ${
+      className={`rounded-lg border px-3 py-2 ${
         isCheapest
           ? "border-green-300 bg-green-50"
           : isCurrent
           ? "border-blue-200 bg-blue-50"
-          : "border-gray-200 bg-white"
+          : "border-gray-100 bg-white"
       }`}
     >
-      <div className="min-w-0">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-sm font-medium text-gray-900 truncate">
-            {store.storeName}
+      <div className="flex items-center justify-between gap-2">
+        {/* Left: rank + store info */}
+        <div className="min-w-0 flex items-start gap-2">
+          <span className="text-[11px] text-gray-400 font-mono tabular-nums mt-0.5 shrink-0">
+            #{rank}
           </span>
-          <StoreFormatBadge format={store.storeFormat} />
-          {isCurrent && (
-            <span className="text-[10px] bg-blue-200 text-blue-800 px-1.5 py-0.5 rounded font-medium">
-              Din butik
-            </span>
-          )}
-          {isCheapest && (
-            <span className="text-[10px] bg-green-200 text-green-800 px-1.5 py-0.5 rounded font-medium">
-              Billigast
-            </span>
-          )}
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-sm font-medium text-gray-900 truncate">
+                {store.storeName}
+              </span>
+              <StoreFormatBadge format={store.storeFormat} />
+              {isCurrent && (
+                <span className="text-[10px] bg-blue-200 text-blue-800 px-1.5 py-0.5 rounded font-medium">
+                  Din butik
+                </span>
+              )}
+              {isCheapest && (
+                <span className="text-[10px] bg-green-200 text-green-800 px-1.5 py-0.5 rounded font-medium">
+                  Billigast
+                </span>
+              )}
+            </div>
+            {missingItems.length > 0 && (
+              <div className="mt-0.5 space-y-0.5">
+                {knownMissing.map((item) => (
+                  <p key={item.productId} className="text-[10px] text-amber-600 leading-tight">
+                    Saknas: {item.name}
+                    {item.currentPrice !== null
+                      ? ` (${formatPrice(item.currentPrice)} kr)`
+                      : ""}
+                  </p>
+                ))}
+                {unknownMissing.length > 0 && (
+                  <p className="text-[10px] text-gray-400 leading-tight">
+                    {unknownMissing.length} vara{unknownMissing.length > 1 ? "r" : ""} kan inte jämföras
+                    {unknownPrice > 0 ? ` (${formatPrice(unknownPrice)} kr i din butik)` : ""}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-        {missingCount > 0 && (
-          <p className="text-[10px] text-amber-600 mt-0.5">
-            {missingCount} vara{missingCount !== 1 ? "r" : ""} saknas
+
+        {/* Right: price + open button */}
+        <div className="text-right shrink-0 flex flex-col items-end gap-1">
+          <p className="text-sm font-bold text-gray-900">
+            {formatPrice(store.totalPrice)} kr
           </p>
-        )}
-      </div>
-      <div className="text-right shrink-0">
-        <p className="text-sm font-bold text-gray-900">
-          {formatPrice(store.totalPrice)} kr
-        </p>
-        {missingCount > 0 && (
-          <p className="text-[10px] text-gray-400">inkl. tillgängliga</p>
-        )}
+          {missingCount > 0 && (
+            <p className="text-[10px] text-gray-400">inkl. tillgängliga</p>
+          )}
+          <button
+            onClick={() => onOpenCart(store)}
+            className="text-[11px] text-gray-400 hover:text-[#1a5c2e] font-medium transition-colors leading-none"
+            title={`Öppna varukorg hos ${store.storeName}`}
+          >
+            Öppna →
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -345,7 +419,6 @@ function ProductTable({
           </thead>
           <tbody>
             {cartItems.map((item) => {
-              // Find cheapest price across stores for this product
               const prices = stores
                 .map((s) => {
                   const p = s.products.find((p) => p.productId === item.productId);

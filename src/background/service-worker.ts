@@ -260,6 +260,10 @@ async function applyCartInMainWorld(
   storeId: string,
   storeName: string
 ): Promise<void> {
+  // Prevent concurrent runs (rapid double-clicks).
+  if ((window as any).__icaCartRebuildActive) return;
+  (window as any).__icaCartRebuildActive = true;
+
   function showOverlay(msg: string) {
     let el = document.getElementById("ica-rebuild-overlay");
     if (!el) {
@@ -293,55 +297,99 @@ async function applyCartInMainWorld(
   post({ type: "REBUILD_STARTED", total: items.length, storeName });
   showOverlay(`Bygger varukorg hos ${storeName}…`);
 
-  if (!csrf) {
-    post({
-      type: "REBUILD_COMPLETE",
-      added: 0,
-      failed: items.length,
-      failedItems: items.map((i) => i.name),
-    });
-    showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
-    setTimeout(removeOverlay, 6000);
-    return;
-  }
-
   try {
-    const resp = await fetch(
-      `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-TOKEN": csrf,
-          "ecom-request-source": "web",
-          ...(version ? { "ecom-request-source-version": version } : {}),
-        },
-        body: JSON.stringify(
-          items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
-        ),
-      }
-    );
-
-    if (resp.ok) {
-      post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
-      showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
-      setTimeout(removeOverlay, 3000);
-      // Navigate tab to target store so the user sees their new cart
-      setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
-    } else {
-      throw new Error(`HTTP ${resp.status}`);
+    if (!csrf) {
+      post({ type: "REBUILD_COMPLETE", added: 0, failed: items.length, failedItems: items.map((i) => i.name) });
+      showOverlay("Saknar autentisering — besök handlaprivatkund.ica.se och logga in.");
+      setTimeout(removeOverlay, 6000);
+      return;
     }
+
+    const apiHeaders = {
+      "Content-Type": "application/json",
+      "X-CSRF-TOKEN": csrf,
+      "ecom-request-source": "web",
+      ...(version ? { "ecom-request-source-version": version } : {}),
+    };
+
+    // ── Delta-based cart update ──────────────────────────────────────────────
+    // ICA's apply-quantity is a delta/additive API: sending {quantity: N} adds N
+    // to whatever is already in the cart — it does NOT set an absolute value.
+    // Sending {quantity: 0} is therefore a no-op, not a removal.
+    //
+    // Strategy: read the current cart, compute the exact delta needed to reach
+    // the desired final state, and send a single POST:
+    //   • Items to remove     → quantity: -(currentQty)
+    //   • Items to adjust     → quantity: newQty - currentQty
+    //   • Brand-new items     → quantity: newQty   (currentQty = 0)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let payload: Array<{ productId: string; quantity: number }>;
+    try {
+      const cartResp = await fetch(
+        `/stores/${storeId}/api/cart/v1/carts/active`,
+        { credentials: "include", headers: { Accept: "application/json" } }
+      );
+      if (cartResp.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const cartData: any = await cartResp.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const existingItems: any[] = cartData.items ?? [];
+
+        // Build productId → current quantity map
+        const currentQty = new Map<string, number>();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const item of existingItems) {
+          const qty =
+            typeof item.quantity === "object"
+              ? (item.quantity.quantityInBasket ?? 1)
+              : (item.quantity ?? 1);
+          currentQty.set(item.productId, qty);
+        }
+
+        const newProductIds = new Set(items.map((i) => i.productId));
+        payload = [
+          // Remove items that are in the cart but not in the new set
+          ...Array.from(currentQty.entries())
+            .filter(([id]) => !newProductIds.has(id))
+            .map(([id, qty]) => ({ productId: id, quantity: -qty })),
+          // Add / adjust items in the new set (skip if delta is zero)
+          ...items
+            .map((i) => ({
+              productId: i.productId,
+              quantity: i.quantity - (currentQty.get(i.productId) ?? 0),
+            }))
+            .filter((i) => i.quantity !== 0),
+        ];
+      } else {
+        // Can't read the cart — assume empty and send full quantities
+        payload = items.map((i) => ({ productId: i.productId, quantity: i.quantity }));
+      }
+    } catch {
+      // Network error — assume empty cart
+      payload = items.map((i) => ({ productId: i.productId, quantity: i.quantity }));
+    }
+
+    if (payload.length > 0) {
+      const resp = await fetch(
+        `/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`,
+        { method: "POST", credentials: "include", headers: apiHeaders, body: JSON.stringify(payload) }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    }
+
+    post({ type: "REBUILD_COMPLETE", added: items.length, failed: 0, failedItems: [] });
+    showOverlay(`✓ Varukorg skapad hos ${storeName}!`);
+    setTimeout(removeOverlay, 3000);
+    // Navigate tab to target store so the user sees their new cart
+    setTimeout(() => { window.location.href = `/stores/${storeId}`; }, 800);
+
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : "okänt fel";
-    post({
-      type: "REBUILD_COMPLETE",
-      added: 0,
-      failed: items.length,
-      failedItems: items.map((i) => i.name),
-    });
+    post({ type: "REBUILD_COMPLETE", added: 0, failed: items.length, failedItems: items.map((i) => i.name) });
     showOverlay(`Fel vid återskapning:\n${errMsg}`);
     setTimeout(removeOverlay, 8000);
+  } finally {
+    (window as any).__icaCartRebuildActive = false;
   }
 }
 
@@ -356,15 +404,22 @@ async function applyCartInMainWorld(
  *      (e.g. newly added items, non-standard catalog products).
  *   3. Fallback: returns null for both fields (will show as unavailable).
  */
-function readProductEntitiesInMainWorld(
-  productIds: string[]
-): Array<{ productId: string; retailerProductId: string | null; name: string | null }> {
+async function readProductEntitiesInMainWorld(
+  productIds: string[],
+  storeIdForSearch: string
+): Promise<Array<{ productId: string; retailerProductId: string | null; name: string | null }>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const state = (window as any).__INITIAL_STATE__;
 
-  // Path 1: productEntities (keyed by productId)
+  // Path 1: productEntities (keyed by productId) — try several known Redux shapes
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const entities: Record<string, any> = state?.data?.products?.productEntities ?? {};
+  const entities: Record<string, any> = Object.assign(
+    {},
+    state?.data?.products?.productEntities,
+    state?.data?.products?.entities,
+    state?.data?.productEntities,
+    state?.productEntities
+  );
 
   // Path 2: basket items — try several known Redux state shapes
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -382,24 +437,60 @@ function readProductEntitiesInMainWorld(
     if (pid) basketMap.set(pid, bi);
   }
 
-  return productIds.map((id) => {
+  const results = productIds.map((id) => {
     const entity = entities[id];
     const bi = basketMap.get(id);
+    // Try several nested sub-objects basket items can use for product details
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nested: any = bi?.product ?? bi?.productDetails ?? bi?.catalogItem ?? null;
     const retailerProductId =
       entity?.retailerProductId ??
       bi?.retailerProductId ??
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (bi?.product as any)?.retailerProductId ??
+      nested?.retailerProductId ??
       null;
     const name =
       entity?.name ??
       bi?.name ??
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (bi?.product as any)?.name ??
+      nested?.name ??
       bi?.title ??
       null;
     return { productId: id, retailerProductId, name };
   });
+
+  // Fallback: for items still without retailerProductId, search the current
+  // store's v6 API using the productId as query. UUID-format productIds may not
+  // be indexed, but article-number-format IDs sometimes are. Safe to try.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unresolved = results.filter((r: any) => !r.retailerProductId);
+  if (unresolved.length > 0 && storeIdForSearch) {
+    await Promise.all(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      unresolved.map(async (r: any) => {
+        try {
+          const url =
+            `/stores/${storeIdForSearch}/api/webproductpagews/v6/product-pages/search` +
+            `?q=${encodeURIComponent(r.productId)}&maxPageSize=5&tag=web`;
+          const resp = await fetch(url, { credentials: "include" });
+          if (!resp.ok) return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const data: any = await resp.json();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const products: any[] = (data.productGroups ?? []).flatMap(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (g: any) => g.decoratedProducts ?? g.products ?? []
+          );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const match = products.find((p: any) => p.productId === r.productId);
+          if (match) {
+            r.retailerProductId = match.retailerProductId ?? null;
+            if (!r.name) r.name = match.name ?? null;
+          }
+        } catch { /* ignore */ }
+      })
+    );
+  }
+
+  return results;
 }
 
 // ─── Comparison logic ────────────────────────────────────────────────────────
@@ -437,7 +528,7 @@ async function runComparison(
           target: { tabId: icaTabId },
           world: "MAIN",
           func: readProductEntitiesInMainWorld,
-          args: [unenrichedIds],
+          args: [unenrichedIds, storeId],
         });
         type EntityEntry = { productId: string; retailerProductId: string | null; name: string | null };
         for (const e of (injected[0]?.result ?? []) as EntityEntry[]) {
@@ -506,7 +597,7 @@ async function runComparison(
         step: "store_catalogues",
         current: bulkCompleted,
         total: n,
-        detail: store.name,
+        detail: "Hämtar priser…",
       });
       return { store, products };
     })
@@ -793,6 +884,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       const existingTabId = await findIcaTabId();
       if (existingTabId !== null) {
+        // Focus the ICA tab so the user sees the cart being rebuilt
+        chrome.tabs.update(existingTabId, { active: true }).catch(() => {});
+        chrome.tabs.get(existingTabId).then((tab) => {
+          if (tab.windowId) chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        }).catch(() => {});
+
         // Reuse the open ICA tab — fastest path, no navigation needed before inject
         chrome.scripting.executeScript({
           target: { tabId: existingTabId },

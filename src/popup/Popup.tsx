@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import StoreComparison from "./StoreComparison";
 import type {
   ComparisonResult,
@@ -244,6 +244,7 @@ export default function Popup() {
             cartStale={cartStale}
             comparisonUpdatedAt={comparisonUpdatedAt}
             onRefreshComparison={runComparison}
+            liveStoreId={storeId}
           />
         )}
 
@@ -268,30 +269,23 @@ export default function Popup() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-/** True % for steps with real sub-progress; 0 for indeterminate steps */
-function comparisonProgressDeterminate(p: ComparisonProgressState): number {
-  if (p.total <= 0) return 0;
-  if (p.step === "store_catalogues" || p.step === "iframe_fallback") {
-    return Math.min(100, Math.round((p.current / p.total) * 100));
+/**
+ * Maps all comparison steps to a single continuously-increasing 0–100 scale.
+ * cart+stores_list: 0–8 %
+ * store_catalogues: 8–82 %
+ * iframe_fallback:  82–98 %
+ * Never resets — the bar only moves forward.
+ */
+function computeUnifiedPercent(p: ComparisonProgressState | null): number {
+  if (!p) return 0;
+  const frac = p.total > 0 ? p.current / p.total : 0;
+  switch (p.step) {
+    case "cart":          return 3;
+    case "stores_list":   return 8;
+    case "store_catalogues": return 8 + Math.round(frac * 74);
+    case "iframe_fallback":  return 82 + Math.round(frac * 16);
+    default: return 0;
   }
-  return 0;
-}
-
-function isComparisonProgressIndeterminate(
-  progress: ComparisonProgressState | null
-): boolean {
-  if (!progress) return true;
-  // Varukorg + butikslista: ingen riktig del-progress från API → glidande stapel
-  if (progress.step === "cart" || progress.step === "stores_list") return true;
-  // Deterministic once we have actual counts
-  if (
-    (progress.step === "store_catalogues" || progress.step === "iframe_fallback") &&
-    progress.total > 0 &&
-    progress.current === 0
-  ) {
-    return true;
-  }
-  return false;
 }
 
 function ComparisonLoadingPanel({
@@ -299,43 +293,83 @@ function ComparisonLoadingPanel({
 }: {
   progress: ComparisonProgressState | null;
 }) {
-  const indeterminate = isComparisonProgressIndeterminate(progress);
-  const pct = progress ? comparisonProgressDeterminate(progress) : 0;
+  // Live clock — ticks every 500 ms so the countdown updates in real time.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  // Ref so we can read the start time without adding it to effect deps.
+  const runStartRef = useRef<number | null>(null);
+  const [totalEstimate, setTotalEstimate] = useState<number>(0);
+  const [iframeEstimate, setIframeEstimate] = useState<number>(3);
+
+  const step = progress?.step;
+  const total = progress?.total ?? 0;
+
+  useEffect(() => {
+    if (!step) {
+      // Comparison finished or not started — reset.
+      runStartRef.current = null;
+      setTotalEstimate(0);
+      return;
+    }
+    if (runStartRef.current === null) {
+      // First step seen — start the clock immediately with a rough initial
+      // estimate (15 s covers most carts; will be refined below).
+      runStartRef.current = Date.now();
+      setTotalEstimate(15);
+    }
+    if (step === "store_catalogues") {
+      // Refine: now we know the store count.
+      const elapsed = (Date.now() - runStartRef.current!) / 1000;
+      const catalogEst = Math.max(3, Math.ceil(total / 10));
+      setTotalEstimate(elapsed + catalogEst + 5); // +5 s iframe placeholder
+    } else if (step === "iframe_fallback") {
+      // Final refinement: actual iframe job count known.
+      const elapsed = (Date.now() - runStartRef.current!) / 1000;
+      const ifrEst = Math.max(3, Math.ceil(total / 30) * 0.85);
+      setIframeEstimate(ifrEst);
+      setTotalEstimate(elapsed + ifrEst);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, total]);
+
+  const pct = computeUnifiedPercent(progress);
   const label = progress?.detail ?? "Startar jämförelse…";
 
-  const hasCounts =
-    progress !== null &&
-    progress.total > 0 &&
-    (progress.step === "store_catalogues" || progress.step === "iframe_fallback");
+  const isIframePhase = step === "iframe_fallback";
+  const iframeDone = isIframePhase && total > 0 && progress?.current === total;
 
-  const countLabel =
-    progress?.step === "store_catalogues"
-      ? "butiker"
-      : "sökningar";
+  // iframe_fallback bar: CSS transition animates 82 → 98 % over iframeEstimate s.
+  // store_catalogues bar: real progress updates drive it incrementally.
+  const barPct = isIframePhase ? 98 : pct;
+  const barTransition = isIframePhase
+    ? `width ${iframeDone ? "0.4s ease-out" : `${iframeEstimate}s linear`}`
+    : "width 0.5s ease-out";
+
+  // Single countdown from the very first step; falls back to pct% only when done.
+  let leftLabel: string;
+  if (runStartRef.current !== null && !iframeDone) {
+    const elapsed = (now - runStartRef.current) / 1000;
+    const remaining = Math.max(1, Math.round(totalEstimate - elapsed));
+    leftLabel = `~${remaining}s`;
+  } else {
+    leftLabel = `${pct}%`;
+  }
 
   return (
-    <div className="py-6 space-y-4">
-      <div className="relative h-3 bg-gray-200 rounded-full overflow-hidden">
-        {indeterminate ? (
-          <div className="ica-progress-indeterminate" aria-hidden />
-        ) : (
-          <div
-            className="h-full bg-[#e3000b] transition-[width] duration-300 ease-out rounded-full"
-            style={{ width: `${pct}%` }}
-          />
-        )}
+    <div className="py-6 space-y-3">
+      <div className="relative h-2.5 bg-gray-200 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-[#e3000b] rounded-full"
+          style={{ width: `${barPct}%`, transition: barTransition }}
+        />
       </div>
-      <div className="flex justify-between text-[11px] text-gray-500 tabular-nums">
-        <span>{!indeterminate && hasCounts ? `${pct}%` : "…"}</span>
-        {hasCounts ? (
-          <span>
-            {progress!.current}/{progress!.total} {countLabel}
-          </span>
-        ) : null}
-      </div>
-      <p className="text-sm text-gray-700 leading-snug min-h-[2.5rem]">{label}</p>
-      <div className="flex justify-center pt-1">
-        <div className="w-7 h-7 border-[3px] border-[#e3000b] border-t-transparent rounded-full animate-spin" />
+      <div className="flex items-center justify-between text-[11px] text-gray-500">
+        <span className="tabular-nums font-medium">{leftLabel}</span>
+        <span className="truncate max-w-[220px] text-right">{label}</span>
       </div>
     </div>
   );

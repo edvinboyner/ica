@@ -61,16 +61,21 @@ export async function fetchActiveCart(storeId: string): Promise<CartItem[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data = await apiFetch<any>(url);
 
-  // Cart API returns only productId + quantity — no names
+  // Cart API returns only productId + quantity — no names.
+  // Some ICA API versions nest product details under item.product; try both.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const items: CartItem[] = (data.items ?? []).map((i: any) => ({
-    productId: i.productId,
-    retailerProductId: i.retailerProductId,
-    name: i.name,
-    quantity: typeof i.quantity === "object" ? (i.quantity.quantityInBasket ?? 1) : (i.quantity ?? 1),
-    price: i.price,
-    finalPrice: i.finalPrice,
-  }));
+  const items: CartItem[] = (data.items ?? []).map((i: any) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nested: any = i.product ?? i.catalogItem ?? {};
+    return {
+      productId: i.productId ?? nested.productId,
+      retailerProductId: i.retailerProductId ?? nested.retailerProductId ?? i.ean ?? nested.ean,
+      name: i.name ?? nested.name ?? i.productName ?? nested.productName,
+      quantity: typeof i.quantity === "object" ? (i.quantity.quantityInBasket ?? 1) : (i.quantity ?? 1),
+      price: i.price ?? nested.price,
+      finalPrice: i.finalPrice ?? nested.finalPrice,
+    };
+  });
 
   // Enrich with name + retailerProductId from the full product catalogue
   try {
