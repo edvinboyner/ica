@@ -121,7 +121,7 @@ export interface RebuildItem {
 
 export type MessageToBackground =
   | InitialStateMessage
-  | { type: "GET_COMPARISON"; zipCode: string }
+  | { type: "GET_COMPARISON"; zipCode: string; storeId?: string }
   | { type: "GET_STATE" }
   | {
       type: "OPEN_CHEAPEST_CART";

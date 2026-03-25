@@ -922,9 +922,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "GET_COMPARISON") {
       const state = await getStoredState();
       const zipCode: string = message.zipCode ?? state.zipCode;
-      // Try storage first, then actively query the open ICA tab
+      // Prefer the storeId sent by the popup (queried from the active ICA tab),
+      // which correctly reflects which tab the user clicked the extension from.
+      // Fall back to stored state, then actively query any open ICA tab.
       const storeId: string | null =
-        state.storeId ?? (await queryStoreIdFromTab());
+        message.storeId ?? state.storeId ?? (await queryStoreIdFromTab());
 
       if (!storeId) {
         sendResponse({

@@ -39,3 +39,6 @@ Used solely to identify the user's open ICA tab so the price comparison can be r
 
 **storage:**
 Used to save the user's postal code and store ID locally between sessions, so they don't have to re-enter it each time.
+
+**windows:**
+Used to bring the user's existing ICA browser tab to the foreground when "Öppna billigaste varukorg" is clicked, so the user can see the cart being rebuilt without having to manually switch windows.

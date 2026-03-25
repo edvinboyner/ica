@@ -30,9 +30,28 @@ export default function Popup() {
   useEffect(() => {
     chrome.runtime.sendMessage({ type: "GET_STATE" }, (resp) => {
       if (resp) {
-        setStoreId(resp.storeId ?? null);
+        // Use stored storeId as initial value; active-tab query below may override it
+        setStoreId((prev) => prev ?? resp.storeId ?? null);
         setSavedZip(resp.zipCode ?? null);
         if (resp.zipCode) setZipCode(resp.zipCode);
+      }
+    });
+
+    // Query the active tab in each open window and prefer the ICA tab the user
+    // is currently on. This fixes the multi-tab bug where the last-stored storeId
+    // (from a different ICA tab) was used instead of the currently active one.
+    chrome.tabs.query({ active: true }, (tabs) => {
+      for (const tab of tabs) {
+        if (!tab.id || !tab.url?.includes("handlaprivatkund.ica.se")) continue;
+        chrome.tabs.sendMessage(
+          tab.id,
+          { type: "GET_INITIAL_STATE" },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp?.storeId) return;
+            setStoreId(resp.storeId as string);
+          }
+        );
+        break; // use first matching active ICA tab
       }
     });
 
@@ -168,7 +187,7 @@ export default function Popup() {
     });
 
     chrome.runtime.sendMessage(
-      { type: "GET_COMPARISON", zipCode: zip },
+      { type: "GET_COMPARISON", zipCode: zip, storeId: storeId ?? undefined },
       (resp) => {
         if (!resp) {
           setError("Inget svar från service worker.");
