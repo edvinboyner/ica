@@ -114,12 +114,21 @@ export default function StoreComparison({
   // stores that carry ALL comparable items (so a store missing items can't "win"
   // by having a lower total due to missing prices).
   const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
+  const cheapestPrice = cheapestStore?.totalPrice;
 
   // Savings relative to where the user is now (0 if they're already at cheapest).
   const displaySaving =
     displayCurrentStore && cheapestStore && cheapestStore.storeId !== displayCurrentStore.storeId
       ? Math.max(0, displayCurrentStore.totalPrice - cheapestStore.totalPrice)
       : 0;
+
+  // True when the user's store is tied in price with the cheapest store but
+  // isn't the one designated as cheapestStoreId (alphabetical tiebreak).
+  const isTiedWithCheapest =
+    displayCurrentStore !== undefined &&
+    cheapestPrice !== undefined &&
+    displayCurrentStore.totalPrice === cheapestPrice &&
+    displayCurrentStore.storeId !== cheapestStoreId;
 
   // hasHiddenDeals is still based on the original home store (actualCartTotal
   // comes from the home-store cart API and is fixed at comparison time).
@@ -208,7 +217,9 @@ export default function StoreComparison({
       ) : (
         <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 space-y-1">
           <p className="text-sm font-medium text-blue-800">
-            Du handlar redan i den billigaste butiken!
+            {isTiedWithCheapest
+              ? "Du handlar i en av de billigaste butikerna!"
+              : "Du handlar redan i den billigaste butiken!"}
           </p>
           <p className="text-[11px] text-blue-600">
             Du kan ändå öppna korgen i en annan butik via listan nedan.
@@ -242,7 +253,7 @@ export default function StoreComparison({
             store={store}
             rank={idx + 1}
             isCurrent={store.storeId === currentStoreId}
-            isCheapest={store.storeId === cheapestStoreId}
+            isCheapest={cheapestPrice !== undefined && store.totalPrice === cheapestPrice}
             totalItems={cartItems.length}
             cartItems={cartItems}
             onOpenCart={openCart}
@@ -352,7 +363,9 @@ function StoreRow({
             {formatPrice(store.totalPrice)} kr
           </p>
           {missingCount > 0 && (
-            <p className="text-[10px] text-gray-400">inkl. tillgängliga</p>
+            <p className="text-[10px] text-amber-600">
+              {missingCount} vara{missingCount !== 1 ? "r" : ""} saknas
+            </p>
           )}
           <button
             onClick={() => onOpenCart(store)}

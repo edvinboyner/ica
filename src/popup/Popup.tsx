@@ -341,16 +341,16 @@ function ComparisonLoadingPanel({
       setTotalEstimate(15);
     }
     if (step === "store_catalogues") {
-      // Refine: now we know the store count.
+      // Refine: now we know the store count. Buffer includes time for iframe phase.
       const elapsed = (Date.now() - runStartRef.current!) / 1000;
       const catalogEst = Math.max(3, Math.ceil(total / 10));
-      setTotalEstimate(elapsed + catalogEst + 5); // +5 s iframe placeholder
+      setTotalEstimate(elapsed + catalogEst + 10); // +10 s iframe buffer
     } else if (step === "iframe_fallback") {
-      // Final refinement: actual iframe job count known.
-      const elapsed = (Date.now() - runStartRef.current!) / 1000;
-      const ifrEst = Math.max(3, Math.ceil(total / 30) * 0.85);
+      // Update bar animation duration but do NOT reset totalEstimate — that would
+      // cause the countdown to jump back up if the catalog phase ran long.
+      // The existing estimate keeps ticking down smoothly; bar CSS handles visuals.
+      const ifrEst = Math.max(2, Math.ceil(total / 30) * 0.85);
       setIframeEstimate(ifrEst);
-      setTotalEstimate(elapsed + ifrEst);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, total]);

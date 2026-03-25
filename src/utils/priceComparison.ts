@@ -172,7 +172,14 @@ export function buildComparisonResult(
 
   return {
     cartItems,
-    stores: [...stores].sort((a, b) => a.totalPrice - b.totalPrice),
+    // Full stores (carry all comparable items) first, sorted by price.
+    // Incomplete stores go last (artificially low totals from missing items).
+    stores: [...stores].sort((a, b) => {
+      const aFull = a.availableCount >= threshold;
+      const bFull = b.availableCount >= threshold;
+      if (aFull !== bFull) return aFull ? -1 : 1;
+      return a.totalPrice - b.totalPrice;
+    }),
     currentStoreId,
     cheapestStoreId,
     savingVsCurrent,
