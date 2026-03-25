@@ -105,11 +105,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-// MAIN-world rebuild script cannot use chrome.* — forward progress via postMessage
+// MAIN-world rebuild script cannot use chrome.* — forward progress via postMessage.
+// Only the three known rebuild message types are allowed through to prevent
+// arbitrary page scripts from sending unexpected messages to the service worker.
+const ALLOWED_MSG_TYPES = new Set(["REBUILD_STARTED", "REBUILD_PROGRESS", "REBUILD_COMPLETE"]);
+
 window.addEventListener("message", (event: MessageEvent) => {
   if (event.source !== window) return;
   const d = event.data as { __icaExt?: boolean; type?: string } | null;
   if (!d || d.__icaExt !== true || typeof d.type !== "string") return;
+  if (!ALLOWED_MSG_TYPES.has(d.type)) return;
   const { __icaExt: _x, ...msg } = d as Record<string, unknown>;
   chrome.runtime.sendMessage(msg);
 });
