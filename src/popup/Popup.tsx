@@ -295,16 +295,45 @@ function ComparisonLoadingPanel({
   const pct = computeUnifiedPercent(progress);
   const label = progress?.detail ?? "Startar jämförelse…";
 
+  // During the iframe_fallback phase the service worker only writes two
+  // progress updates: one at start (current=0) and one at end (current=total).
+  // Without special handling the bar would sit frozen at 82 % for 10–15 s.
+  //
+  // Fix: when the phase starts we know total jobs → estimate duration →
+  // set a CSS transition that animates the bar linearly from 82 → 98 % over
+  // the estimated time.  If the phase finishes early, snap to 98 % fast.
+  //
+  // Estimate: ≈ 30 concurrent workers, ~0.85 s per round-trip → ceil(jobs/30)*0.85 s.
+  const isIframePhase = progress?.step === "iframe_fallback";
+  const iframeJobs = isIframePhase ? (progress?.total ?? 0) : 0;
+  const iframeDone =
+    isIframePhase && iframeJobs > 0 && progress?.current === progress?.total;
+  const estimatedSec = iframeJobs > 0
+    ? Math.max(3, Math.ceil(iframeJobs / 30) * 0.85)
+    : 3;
+
+  // Bar target: 98 % as soon as iframe phase starts (CSS transition does the work).
+  // All other phases: use the computed step-based %.
+  const barPct = isIframePhase ? 98 : pct;
+  const barTransition = isIframePhase
+    ? `width ${iframeDone ? "0.4s ease-out" : `${estimatedSec}s linear`}`
+    : "width 0.5s ease-out";
+
+  // Left label: show estimated seconds remaining during active iframe phase.
+  const leftLabel = isIframePhase && !iframeDone && iframeJobs > 0
+    ? `~${Math.round(estimatedSec)}s`
+    : `${pct}%`;
+
   return (
     <div className="py-6 space-y-3">
       <div className="relative h-2.5 bg-gray-200 rounded-full overflow-hidden">
         <div
-          className="h-full bg-[#e3000b] transition-[width] duration-500 ease-out rounded-full"
-          style={{ width: `${pct}%` }}
+          className="h-full bg-[#e3000b] rounded-full"
+          style={{ width: `${barPct}%`, transition: barTransition }}
         />
       </div>
       <div className="flex items-center justify-between text-[11px] text-gray-500">
-        <span className="tabular-nums font-medium">{pct}%</span>
+        <span className="tabular-nums font-medium">{leftLabel}</span>
         <span className="truncate max-w-[220px] text-right">{label}</span>
       </div>
     </div>

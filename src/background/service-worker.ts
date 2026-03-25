@@ -293,8 +293,10 @@ async function applyCartInMainWorld(
   post({ type: "REBUILD_STARTED", total: items.length, storeName });
   showOverlay(`Bygger varukorg hos ${storeName}…`);
 
-  // Step 0: Clear existing cart items that are not part of the new cart.
-  // This prevents stale items from remaining in the target store's basket.
+  // Step 0: Clear ALL existing cart items before adding new ones.
+  // The apply-quantity API is additive (not absolute), so we must zero out
+  // everything first — otherwise clicking the button multiple times stacks
+  // quantities on top of the items already in the cart.
   try {
     const existingCartResp = await fetch(
       `/stores/${storeId}/api/cart/v1/carts/active`,
@@ -305,10 +307,7 @@ async function applyCartInMainWorld(
       const existingCartData: any = await existingCartResp.json();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const existingItems: Array<{ productId: string }> = existingCartData.items ?? [];
-      const newProductIds = new Set<string>(items.map((i) => i.productId));
-      const toRemove = existingItems
-        .filter((i) => !newProductIds.has(i.productId))
-        .map((i) => ({ productId: i.productId, quantity: 0 }));
+      const toRemove = existingItems.map((i) => ({ productId: i.productId, quantity: 0 }));
       if (toRemove.length > 0) {
         await fetch(`/stores/${storeId}/api/cart/v1/carts/active/apply-quantity`, {
           method: "POST",
