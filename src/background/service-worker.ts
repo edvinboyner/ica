@@ -193,14 +193,45 @@ async function iframeLookupInMainWorld(
           const desc: string = promo.description ?? "";
           const requiredQty: number = promo.requiredProductQuantity ?? 0;
 
-          // "N för X kr" — only apply when cart quantity meets the group threshold
+          // "N för X kr" — only apply when cart quantity meets the group threshold.
+          // Also respect "max N erbj/hushåll" household limits: when the user has more
+          // units than the deal allows, compute a blended price so we don't underestimate
+          // the total. Try several candidate field names ICA's promo API might use.
           if (requiredQty > 0 && job.quantity >= requiredQty) {
             const m = desc.match(/\d+\s+f\u00f6r\s+([\d,.]+)\s*kr/i);
             if (m) {
               const totalForGroup = parseFloat(m[1].replace(",", "."));
               if (isFinite(totalForGroup) && totalForGroup > 0) {
                 const dealPerUnit = totalForGroup / requiredQty;
-                if (price === null || dealPerUnit < price) price = dealPerUnit;
+                // Find the per-household activation cap from whichever field ICA exposes
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const maxAct: number = ([
+                  promo.maxNumberOfActivations,
+                  promo.maxActivationsPerCart,
+                  promo.maxActivationsPerOrder,
+                  promo.maxActivationsPerHousehold,
+                  promo.purchaseLimit,
+                  promo.maxPurchasePerCustomer,
+                ] as unknown[]).find(
+                  (v): v is number => typeof v === "number" && isFinite(v) && v > 0
+                ) ?? Infinity;
+                const maxDealUnits = requiredQty * maxAct;
+                if (
+                  isFinite(maxDealUnits) &&
+                  job.quantity > maxDealUnits &&
+                  isFinite(regularAmount) && regularAmount > 0
+                ) {
+                  // Blended price: cap units at deal price, rest pay shelf price.
+                  // Dividing total by quantity gives a per-unit price that, when
+                  // multiplied by quantity in buildStorePrice, yields the correct sum.
+                  const totalCost =
+                    maxDealUnits * dealPerUnit +
+                    (job.quantity - maxDealUnits) * regularAmount;
+                  const blended = totalCost / job.quantity;
+                  if (price === null || blended < price) price = blended;
+                } else {
+                  if (price === null || dealPerUnit < price) price = dealPerUnit;
+                }
               }
             }
           }
