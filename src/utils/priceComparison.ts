@@ -111,7 +111,13 @@ export function buildStorePrice(
       // only the first maxDealUnits units get the deal price; the rest pay the
       // bulk-catalog shelf price (regularPrice). This avoids underestimating the
       // total when the user's quantity exceeds the per-household activation limit.
-      if (ir?.maxDealUnits !== undefined && item.quantity > ir.maxDealUnits) {
+      //
+      // Guard: only apply the cap when the iframe deal actually won (fetchedPrice < catalogPrice).
+      // If the catalog won via min(), the household-capped deal is irrelevant — the customer
+      // uses the catalog campaign for all units instead.
+      const iframeDealWon =
+        fetchedPrice !== null && (catalogPrice === null || fetchedPrice < catalogPrice);
+      if (ir?.maxDealUnits !== undefined && item.quantity > ir.maxDealUnits && iframeDealWon) {
         const shelfP = reg !== null ? reg : price; // bulk-catalog shelf price is reliable
         total += ir.maxDealUnits * price + (item.quantity - ir.maxDealUnits) * shelfP;
       } else {
