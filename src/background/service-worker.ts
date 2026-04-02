@@ -117,6 +117,7 @@ async function iframeLookupInMainWorld(
     retailerProductId: string;
     price: number | null;
     available: boolean;
+    maxDealUnits?: number;
   }>
 > {
   const MAX_CONCURRENT = 30;
@@ -126,6 +127,7 @@ async function iframeLookupInMainWorld(
     retailerProductId: string;
     price: number | null;
     available: boolean;
+    maxDealUnits?: number;
   }> = jobs.map((j) => ({
     storeId: j.storeId,
     retailerProductId: j.retailerProductId,
@@ -185,6 +187,11 @@ async function iframeLookupInMainWorld(
           price = price !== null ? Math.min(price, currentAmount) : currentAmount;
         }
 
+        // Track the lowest household-capped deal unit cap seen across all promotions.
+        // buildStorePrice will use this (together with the bulk-catalog shelf price)
+        // to compute the correct blended total for quantities that exceed the cap.
+        let maxDealUnits: number | undefined = undefined;
+
         // Check promotions for deals. Two formats handled:
         //   "N för X kr"  — multi-buy stammis/campaigns ("2 för 135 kr")
         //   "X kr/st"     — single-unit named campaigns ("20 kr/st", "54,90 kr/st")
@@ -201,6 +208,21 @@ async function iframeLookupInMainWorld(
               if (isFinite(totalForGroup) && totalForGroup > 0) {
                 const dealPerUnit = totalForGroup / requiredQty;
                 if (price === null || dealPerUnit < price) price = dealPerUnit;
+
+                // Detect "Max N erbj/hushåll" household cap in the description.
+                // ICA embeds this only as text — there is no dedicated numeric field.
+                // Example: "2 för 23 kr -- Max 1 erbj/hushåll"
+                const capMatch = desc.match(/max\s+(\d+)\s+erbj/i);
+                if (capMatch) {
+                  const maxActivations = parseInt(capMatch[1], 10);
+                  if (maxActivations > 0) {
+                    const capUnits = requiredQty * maxActivations;
+                    // Keep the tightest cap if multiple promos apply
+                    if (maxDealUnits === undefined || capUnits < maxDealUnits) {
+                      maxDealUnits = capUnits;
+                    }
+                  }
+                }
               }
             }
           }
@@ -220,6 +242,11 @@ async function iframeLookupInMainWorld(
           retailerProductId: job.retailerProductId,
           price,
           available: match.available === true && price !== null,
+          // Only set when the quantity actually exceeds the household cap —
+          // buildStorePrice uses this to compute the correct blended total.
+          ...(maxDealUnits !== undefined && job.quantity > maxDealUnits
+            ? { maxDealUnits }
+            : {}),
         };
       } catch {
         /* leave as { price: null, available: false } */
@@ -677,8 +704,8 @@ async function runComparison(
   //   2. Slice into batches of ≈ one "round" (one job per store).
   //      After each batch we update the progress counter in session storage
   //      so the popup re-renders with the current count.
-  type IframeResult = { storeId: string; retailerProductId: string; price: number | null; available: boolean };
-  const iframeByStore = new Map<string, Map<string, { price: number | null; available: boolean }>>();
+  type IframeResult = { storeId: string; retailerProductId: string; price: number | null; available: boolean; maxDealUnits?: number };
+  const iframeByStore = new Map<string, Map<string, { price: number | null; available: boolean; maxDealUnits?: number }>>();
 
   if (iframeJobs.length > 0 && icaTabId !== null) {
     // The search-API lookup handles its own concurrency (30 parallel fetch calls).
@@ -699,7 +726,11 @@ async function runComparison(
       });
       for (const r of (injected[0]?.result ?? []) as IframeResult[]) {
         if (!iframeByStore.has(r.storeId)) iframeByStore.set(r.storeId, new Map());
-        iframeByStore.get(r.storeId)!.set(r.retailerProductId, { price: r.price, available: r.available });
+        iframeByStore.get(r.storeId)!.set(r.retailerProductId, {
+          price: r.price,
+          available: r.available,
+          ...(r.maxDealUnits !== undefined ? { maxDealUnits: r.maxDealUnits } : {}),
+        });
       }
     } catch {
       /* search step failed — continue with bulk-only results */

@@ -64,7 +64,7 @@ export function buildStorePrice(
   store: Store,
   cartItems: ProductMatch[],
   storeProducts: Product[],
-  iframeResults?: Map<string, { price: number | null; available: boolean }>
+  iframeResults?: Map<string, { price: number | null; available: boolean; maxDealUnits?: number }>
 ): StorePrice {
   // Key by retailerProductId (stable cross-store identifier)
   const productMap = new Map<string, Product>();
@@ -106,7 +106,18 @@ export function buildStorePrice(
         return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
       }
       const reg = regularPrice(found);
-      total += price * item.quantity;
+
+      // Household-capped deal (e.g. "2 för 23 kr — Max 1 erbj/hushåll" with qty=4):
+      // only the first maxDealUnits units get the deal price; the rest pay the
+      // bulk-catalog shelf price (regularPrice). This avoids underestimating the
+      // total when the user's quantity exceeds the per-household activation limit.
+      if (ir?.maxDealUnits !== undefined && item.quantity > ir.maxDealUnits) {
+        const shelfP = reg !== null ? reg : price; // bulk-catalog shelf price is reliable
+        total += ir.maxDealUnits * price + (item.quantity - ir.maxDealUnits) * shelfP;
+      } else {
+        total += price * item.quantity;
+      }
+
       availableCount++;
       return {
         productId: item.productId,
