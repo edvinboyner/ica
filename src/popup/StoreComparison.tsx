@@ -284,20 +284,20 @@ function StoreRow({
   cartItems: ComparisonResult["cartItems"];
   onOpenCart: (store: StorePrice) => void;
 }) {
-  const missingCount = totalItems - store.availableCount;
-
-  // Find which specific products are missing from this store
-  const missingItems = missingCount > 0
-    ? cartItems.filter((item) => {
-        const p = store.products.find((sp) => sp.productId === item.productId);
-        return !p?.available;
-      })
-    : [];
+  // Find which specific products are unavailable in this store
+  const missingItems = cartItems.filter((item) => {
+    const p = store.products.find((sp) => sp.productId === item.productId);
+    return !p?.available;
+  });
 
   // Items without retailerProductId can't be cross-store matched — group them
   // into a single summary line instead of repeating "Okänd vara" for every store.
   const knownMissing = missingItems.filter((item) => !!item.retailerProductId);
   const unknownMissing = missingItems.filter((item) => !item.retailerProductId);
+
+  // "saknas" only counts items we could look up but didn't find — not unresolvable items
+  // (those are already shown as "kan inte jämföras" and shouldn't double-count as missing).
+  const missingCount = knownMissing.length;
   const unknownPrice = unknownMissing.reduce(
     (sum, item) => sum + (item.currentPrice ?? 0) * item.quantity,
     0
