@@ -25,6 +25,22 @@ export default function Popup() {
   );
   const [comparisonProgress, setComparisonProgress] =
     useState<ComparisonProgressState | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [includeDelivery, setIncludeDelivery] = useState(false);
+
+  // Load persisted settings on mount
+  useEffect(() => {
+    chrome.storage.local.get("settings", (r) => {
+      if (r.settings?.includeDelivery !== undefined) {
+        setIncludeDelivery(r.settings.includeDelivery as boolean);
+      }
+    });
+  }, []);
+
+  function toggleDelivery(val: boolean) {
+    setIncludeDelivery(val);
+    chrome.storage.local.set({ settings: { includeDelivery: val } });
+  }
 
   // Load persisted state on mount
   useEffect(() => {
@@ -210,10 +226,42 @@ export default function Popup() {
   return (
     <div className="bg-white min-h-screen">
       {/* Header */}
-      <div className="bg-[#e3000b] px-4 py-3 flex items-center gap-2">
-        <span className="text-white font-bold text-lg leading-none">ICA</span>
-        <span className="text-white text-sm">Prisjämförelse</span>
+      <div className="bg-[#e3000b] px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-white font-bold text-lg leading-none">ICA</span>
+          <span className="text-white text-sm">Prisjämförelse</span>
+        </div>
+        <button
+          onClick={() => setShowSettings((s) => !s)}
+          className={`text-white transition-opacity ${showSettings ? "opacity-100" : "opacity-60 hover:opacity-100"}`}
+          title="Inställningar"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+        </button>
       </div>
+
+      {/* Settings panel */}
+      {showSettings && (
+        <div className="border-b border-gray-200 bg-gray-50 px-4 py-3 space-y-3">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Inställningar</p>
+          <label className="flex items-center justify-between gap-3 cursor-pointer">
+            <div>
+              <p className="text-sm font-medium text-gray-800">Inkludera frakt i prisjämförelse</p>
+              <p className="text-[11px] text-gray-500">Lägger till plockavgift för butiker som inte når fri frakt</p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={includeDelivery}
+              onClick={() => toggleDelivery(!includeDelivery)}
+              className={`relative shrink-0 w-10 h-6 rounded-full transition-colors ${includeDelivery ? "bg-[#1a5c2e]" : "bg-gray-300"}`}
+            >
+              <span className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${includeDelivery ? "translate-x-4" : "translate-x-0"}`} />
+            </button>
+          </label>
+        </div>
+      )}
 
       <div className="p-4 space-y-4">
         {/* Zip input */}
@@ -264,6 +312,7 @@ export default function Popup() {
             comparisonUpdatedAt={comparisonUpdatedAt}
             onRefreshComparison={runComparison}
             liveStoreId={storeId}
+            includeDelivery={includeDelivery}
           />
         )}
 

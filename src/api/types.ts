@@ -9,6 +9,12 @@ export interface Store {
   city: string;
   storeFormat: "kvantum" | "maxi" | "nara" | "supermarket" | string;
   deliveryMethods: string[];
+  /** Raw marketing text from ICA, e.g. "Plockavgift 59kr. Fri frakt vid köp över 1200kr." */
+  marketingText?: string;
+  /** Delivery/picking fee in SEK when below free-delivery threshold */
+  deliveryFee?: number;
+  /** Cart total (SEK) required for free delivery */
+  freeDeliveryThreshold?: number;
 }
 
 // Cart API types
@@ -87,6 +93,10 @@ export interface StorePrice {
   }[];
   totalPrice: number;
   availableCount: number;
+  /** Delivery cost for this store given the current cart total (0 = free, undefined = unknown) */
+  deliveryCost?: number;
+  /** Cart total required for free delivery at this store */
+  freeDeliveryThreshold?: number;
 }
 
 export interface ComparisonResult {

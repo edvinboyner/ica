@@ -20,10 +20,34 @@ async function apiFetch<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Parse delivery fee and free-delivery threshold from a store's marketing text. */
+function parseDeliveryInfo(text: string | null | undefined): Pick<Store, "deliveryFee" | "freeDeliveryThreshold"> {
+  if (!text) return {};
+  const feeMatch = text.match(/plockavgift\s*(\d+)\s*kr/i);
+  const thresholdMatch = text.match(/fri\s+frakt\s+vid\s+köp\s+över\s*([\d\s]+)\s*kr/i);
+  return {
+    deliveryFee: feeMatch ? parseInt(feeMatch[1], 10) : undefined,
+    freeDeliveryThreshold: thresholdMatch
+      ? parseInt(thresholdMatch[1].replace(/\s/g, ""), 10)
+      : undefined,
+  };
+}
+
 export async function fetchStoresForZip(zipCode: string): Promise<Store[]> {
   const url = `${STORE_API_BASE}/store/v1?zip=${zipCode}&customerType=B2C`;
-  const data = await apiFetch<StoreResponse>(url);
-  return data.forHomeDelivery.filter((s) => s.deliveryMethods.includes("HOME_DELIVERY"));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = await apiFetch<{ forHomeDelivery: any[] }>(url);
+  return data.forHomeDelivery
+    .filter((s) => s.deliveryMethods?.includes("HOME_DELIVERY"))
+    .map((s) => ({
+      accountId: s.accountId,
+      name: s.name,
+      city: s.city,
+      storeFormat: s.storeFormat,
+      deliveryMethods: s.deliveryMethods,
+      marketingText: s.marketingText ?? undefined,
+      ...parseDeliveryInfo(s.marketingText),
+    }));
 }
 
 /**

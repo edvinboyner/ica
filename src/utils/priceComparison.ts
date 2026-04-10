@@ -147,6 +147,12 @@ export function buildStorePrice(
     return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
   });
 
+  // Delivery cost: 0 if cart meets free-delivery threshold, fee otherwise, undefined if unknown.
+  const deliveryCost =
+    store.freeDeliveryThreshold !== undefined && store.deliveryFee !== undefined
+      ? total >= store.freeDeliveryThreshold ? 0 : store.deliveryFee
+      : undefined;
+
   return {
     storeId: store.accountId,
     storeName: store.name,
@@ -154,6 +160,8 @@ export function buildStorePrice(
     products,
     totalPrice: total,
     availableCount,
+    ...(deliveryCost !== undefined && { deliveryCost }),
+    ...(store.freeDeliveryThreshold !== undefined && { freeDeliveryThreshold: store.freeDeliveryThreshold }),
   };
 }
 

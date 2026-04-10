@@ -94,6 +94,7 @@ export default function StoreComparison({
   comparisonUpdatedAt,
   onRefreshComparison,
   liveStoreId,
+  includeDelivery,
 }: {
   result: ComparisonResult;
   rebuildState: RebuildSessionState | null;
@@ -101,34 +102,56 @@ export default function StoreComparison({
   comparisonUpdatedAt: number | null;
   onRefreshComparison: () => void;
   liveStoreId: string | null;
+  includeDelivery: boolean;
 }) {
   const { cartItems, stores, currentStoreId, cheapestStoreId, savingVsCurrent, actualCartTotal } =
     result;
 
+  const resolvableCount = cartItems.filter((i) => !!i.retailerProductId).length;
+  const threshold = resolvableCount > 0 ? resolvableCount : cartItems.length;
+
+  /** Effective total for a store — adds delivery cost when toggle is on */
+  function effectiveTotal(store: StorePrice): number {
+    return includeDelivery && store.deliveryCost !== undefined
+      ? store.totalPrice + store.deliveryCost
+      : store.totalPrice;
+  }
+
+  /** Re-sort stores: full stores first by effectiveTotal, incomplete stores last */
+  const sortedStores = includeDelivery
+    ? [...stores].sort((a, b) => {
+        const aFull = a.availableCount >= threshold;
+        const bFull = b.availableCount >= threshold;
+        if (aFull !== bFull) return aFull ? -1 : 1;
+        return effectiveTotal(a) - effectiveTotal(b);
+      })
+    : stores;
+
   // Use the user's live store (if it's in the results) as the "current" store
   // so the savings banner always reflects where they are right now.
-  const liveStore = liveStoreId ? stores.find((s) => s.storeId === liveStoreId) : undefined;
-  const displayCurrentStore = liveStore ?? stores.find((s) => s.storeId === currentStoreId);
+  const liveStore = liveStoreId ? sortedStores.find((s) => s.storeId === liveStoreId) : undefined;
+  const displayCurrentStore = liveStore ?? sortedStores.find((s) => s.storeId === currentStoreId);
 
-  // Use cheapestStoreId from the comparison result — it was computed using only
-  // stores that carry ALL comparable items (so a store missing items can't "win"
-  // by having a lower total due to missing prices).
-  const cheapestStore = stores.find((s) => s.storeId === cheapestStoreId);
-  const cheapestPrice = cheapestStore?.totalPrice;
+  // When delivery is included, recompute cheapest from sorted stores.
+  // Otherwise use cheapestStoreId from the comparison result.
+  const cheapestStore = includeDelivery
+    ? sortedStores.find((s) => s.availableCount >= threshold)
+    : sortedStores.find((s) => s.storeId === cheapestStoreId);
+  const cheapestPrice = cheapestStore ? effectiveTotal(cheapestStore) : undefined;
 
   // Savings relative to where the user is now (0 if they're already at cheapest).
   const displaySaving =
     displayCurrentStore && cheapestStore && cheapestStore.storeId !== displayCurrentStore.storeId
-      ? Math.max(0, displayCurrentStore.totalPrice - cheapestStore.totalPrice)
+      ? Math.max(0, effectiveTotal(displayCurrentStore) - effectiveTotal(cheapestStore))
       : 0;
 
   // True when the user's store is tied in price with the cheapest store but
-  // isn't the one designated as cheapestStoreId (alphabetical tiebreak).
+  // isn't the one designated as cheapest (alphabetical tiebreak).
   const isTiedWithCheapest =
     displayCurrentStore !== undefined &&
     cheapestPrice !== undefined &&
-    displayCurrentStore.totalPrice === cheapestPrice &&
-    displayCurrentStore.storeId !== cheapestStoreId;
+    effectiveTotal(displayCurrentStore) === cheapestPrice &&
+    displayCurrentStore.storeId !== cheapestStore?.storeId;
 
   // hasHiddenDeals is still based on the original home store (actualCartTotal
   // comes from the home-store cart API and is fixed at comparison time).
@@ -245,18 +268,20 @@ export default function StoreComparison({
       {/* Store list */}
       <div className="space-y-1.5">
         <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-          Butiker ({stores.length})
+          Butiker ({sortedStores.length})
         </h2>
-        {stores.map((store, idx) => (
+        {sortedStores.map((store, idx) => (
           <StoreRow
             key={store.storeId}
             store={store}
             rank={idx + 1}
             isCurrent={store.storeId === currentStoreId}
-            isCheapest={cheapestPrice !== undefined && store.totalPrice === cheapestPrice}
+            isCheapest={cheapestPrice !== undefined && effectiveTotal(store) === cheapestPrice && store.availableCount >= threshold}
             totalItems={cartItems.length}
             cartItems={cartItems}
             onOpenCart={openCart}
+            includeDelivery={includeDelivery}
+            effectiveTotal={effectiveTotal(store)}
           />
         ))}
       </div>
@@ -275,6 +300,8 @@ function StoreRow({
   totalItems,
   cartItems,
   onOpenCart,
+  includeDelivery,
+  effectiveTotal,
 }: {
   store: StorePrice;
   rank: number;
@@ -283,6 +310,8 @@ function StoreRow({
   totalItems: number;
   cartItems: ComparisonResult["cartItems"];
   onOpenCart: (store: StorePrice) => void;
+  includeDelivery: boolean;
+  effectiveTotal: number;
 }) {
   // Find which specific products are unavailable in this store
   const missingItems = cartItems.filter((item) => {
@@ -360,8 +389,16 @@ function StoreRow({
         {/* Right: price + open button */}
         <div className="text-right shrink-0 flex flex-col items-end gap-1">
           <p className="text-sm font-bold text-gray-900">
-            {formatPrice(store.totalPrice)} kr
+            {formatPrice(includeDelivery ? effectiveTotal : store.totalPrice)} kr
           </p>
+          {includeDelivery && store.deliveryCost !== undefined && store.deliveryCost > 0 && (
+            <p className="text-[10px] text-gray-400">
+              inkl. {formatPrice(store.deliveryCost)} kr frakt
+            </p>
+          )}
+          {includeDelivery && store.deliveryCost === 0 && (
+            <p className="text-[10px] text-green-600">Fri frakt</p>
+          )}
           {missingCount > 0 && (
             <p className="text-[10px] text-amber-600">
               {missingCount} vara{missingCount !== 1 ? "r" : ""} saknas
