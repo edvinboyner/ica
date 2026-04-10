@@ -20,17 +20,40 @@ async function apiFetch<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Parse delivery fee and free-delivery threshold from a store's marketing text. */
+/** Parse delivery fee and free-delivery threshold from a store's marketing text.
+ *  ICA stores use completely free-form text so we match several common patterns. */
 function parseDeliveryInfo(text: string | null | undefined): Pick<Store, "deliveryFee" | "freeDeliveryThreshold"> {
   if (!text) return {};
-  const feeMatch = text.match(/plockavgift\s*(\d+)\s*kr/i);
-  const thresholdMatch = text.match(/fri\s+frakt\s+vid\s+köp\s+över\s*([\d\s]+)\s*kr/i);
-  return {
-    deliveryFee: feeMatch ? parseInt(feeMatch[1], 10) : undefined,
-    freeDeliveryThreshold: thresholdMatch
-      ? parseInt(thresholdMatch[1].replace(/\s/g, ""), 10)
-      : undefined,
-  };
+
+  // ── Free-delivery threshold ───────────────────────────────────────────────
+  // Match: "fri frakt/hemleverans/leverans … över/minst X kr"
+  //        "gratis … över/minst X kr"
+  //        "fraktfritt … för/över X kr"
+  //        "bjuder på leveransen … minst X kr"
+  const thresholdMatch =
+    text.match(/(?:fri\s+(?:frakt|hemleverans|leverans|hemkörning)|gratis|fraktfritt|bjuder\s+på\s+leveransen)[^.!?]*?(?:över|minst)\s*([\d][\d\s]*)\s*(?:kr|kronor|:-)/i) ??
+    text.match(/gratis[^.!?]*?(?:vid|om|när)[^.!?]*?(?:köp\s+)?(?:över|minst|för)\s*([\d][\d\s]*)\s*(?:kr|kronor|:-)/i) ??
+    text.match(/fraktfritt[^.!?]*?(?:för|över)\s*([\d][\d\s]*)\s*(?:kr|kronor|:-)/i) ??
+    text.match(/fri\s+(?:hemleverans|frakt|leverans)[^.!?]*?för\s+(?:minst\s+)?([\d][\d\s]*)\s*(?:kr|kronor|:-)/i);
+
+  const freeDeliveryThreshold = thresholdMatch
+    ? parseInt(thresholdMatch[1].replace(/\s/g, ""), 10) || undefined
+    : undefined;
+
+  // ── Delivery fee ──────────────────────────────────────────────────────────
+  const feeMatch =
+    text.match(/plockavgift\s*(\d+)\s*(?:kr|:-)/i) ??
+    text.match(/(\d+)\s*(?:kr|:-)\s+för\s+hemleverans/i) ??
+    text.match(/(?:endast|bara)\s+(\d+)\s*(?:kr|:-)\s+i\s+(?:frakt|avgift)/i) ??
+    text.match(/(\d+)\s*(?:kr|:-)\s+i\s+frakt/i) ??
+    text.match(/(?:hemleverans|hemkörning|leverans)\s+från\s+(\d+)\s*(?:kr|:-)/i) ??
+    text.match(/(?:hemleverans|leverans)[^,]*?(?:för\s+)?(?:endast|bara)\s+(\d+)\s*(?:kr|:-)/i);
+
+  const deliveryFee = feeMatch
+    ? parseInt(feeMatch[1], 10) || undefined
+    : undefined;
+
+  return { deliveryFee, freeDeliveryThreshold };
 }
 
 export async function fetchStoresForZip(zipCode: string): Promise<Store[]> {

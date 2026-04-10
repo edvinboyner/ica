@@ -399,6 +399,9 @@ function StoreRow({
           {includeDelivery && store.deliveryCost === 0 && (
             <p className="text-[10px] text-green-600">Fri frakt</p>
           )}
+          {includeDelivery && store.deliveryCost === undefined && store.freeDeliveryThreshold !== undefined && (
+            <p className="text-[10px] text-gray-400">+ okänd frakt</p>
+          )}
           {missingCount > 0 && (
             <p className="text-[10px] text-amber-600">
               {missingCount} vara{missingCount !== 1 ? "r" : ""} saknas

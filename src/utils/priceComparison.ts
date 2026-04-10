@@ -147,10 +147,18 @@ export function buildStorePrice(
     return { productId: item.productId, price: null, ordinaryPrice: null, available: false };
   });
 
-  // Delivery cost: 0 if cart meets free-delivery threshold, fee otherwise, undefined if unknown.
+  // Delivery cost:
+  //   threshold known + total ≥ threshold  → 0 (free)
+  //   threshold known + total < threshold + fee known → fee amount
+  //   threshold known + total < threshold + fee unknown → undefined (can't determine)
+  //   threshold unknown → undefined
   const deliveryCost =
-    store.freeDeliveryThreshold !== undefined && store.deliveryFee !== undefined
-      ? total >= store.freeDeliveryThreshold ? 0 : store.deliveryFee
+    store.freeDeliveryThreshold !== undefined
+      ? total >= store.freeDeliveryThreshold
+        ? 0
+        : store.deliveryFee !== undefined
+          ? store.deliveryFee
+          : undefined
       : undefined;
 
   return {
